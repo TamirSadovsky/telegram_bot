@@ -1,0 +1,9 @@
+TOKEN = "7724271405:AAHVY_uYfvSEbyCMD71N-OHSUGdEyqhZ5po"
+
+DB_CONNECTION_STRING = (
+    "DRIVER={SQL Server};"
+    "SERVER=81.218.80.23\\WIZSOFT,7002;"
+    "DATABASE=Ram;"
+    "UID=sa;"
+    "PWD=wizsoft"
+)

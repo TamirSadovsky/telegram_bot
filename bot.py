@@ -1,0 +1,33 @@
+import logging
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from handlers import start, handle_message
+from config import TOKEN
+from image_handler import save_image
+
+
+# Log declarations
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO  
+)
+
+def main():
+    """Start the bot"""
+    logging.info("🚀 Starting Telegram bot...")  
+
+    app = Application.builder().token(TOKEN).build()
+
+    logging.info("✅ Application created successfully!")  
+
+    # Add handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    logging.info("📡 Bot is now running and listening for messages...") 
+
+    app.add_handler(MessageHandler(filters.PHOTO, save_image))  # ✅ Add image handler
+
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()

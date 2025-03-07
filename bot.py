@@ -21,11 +21,14 @@ def main():
 
     # Add handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
 
     logging.info("📡 Bot is now running and listening for messages...") 
 
-    app.add_handler(MessageHandler(filters.PHOTO, save_image))  # ✅ Add image handler
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))  # Handle text messages
+    app.add_handler(MessageHandler(filters.PHOTO, handle_message))  # Handle images separately
+
+
 
     app.run_polling()
 

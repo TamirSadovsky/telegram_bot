@@ -10,8 +10,40 @@ from datetime import datetime
 import urllib.parse
 import requests
 import logging
+import os
+from datetime import timedelta
+from google.cloud import storage
+from config import TOKEN
+import uuid
+
+
+# ✅ Set your Google Cloud Storage bucket name
+BUCKET_NAME = "telegram_bot_images_tamir"
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcloud_key.json"
+
+# ✅ Initialize Google Cloud Storage client
+storage_client = storage.Client()
+bucket = storage_client.bucket(BUCKET_NAME)
 
 GOOGLE_MAPS_API_KEY = "AIzaSyAWODnL_x9dbeoVV5vH0uVY7XIAjpfqZR0"  # 🔹 Replace with your API key
+
+def upload_image_to_gcs(local_file_path: str, destination_blob_name: str) -> str:
+    """
+    Uploads an image to Google Cloud Storage and returns a public URL.
+    """
+    try:
+        blob = bucket.blob(destination_blob_name)
+        blob.upload_from_filename(local_file_path)
+
+        # ✅ Make the file publicly accessible
+        blob.make_public()
+
+        public_url = blob.public_url
+        logging.info(f"✅ Image uploaded successfully: {public_url}")
+        return public_url
+    except Exception as e:
+        logging.error(f"❌ Failed to upload image: {e}")
+        return None
 
 def get_best_location(query):
     """
@@ -74,6 +106,12 @@ async def start(update: Update, context: CallbackContext):
     logging.getLogger().setLevel(logging.INFO)
     """Start conversation and ask for car number."""
     user_id = update.message.chat_id
+
+    # 🔴 Check if it's a photo
+    if update.message.photo:
+        logging.info(f"📸 DEBUG: Received an image from user {user_id}")
+    else:
+        logging.info(f"💬 DEBUG: Received text: {update.message.text} from user {user_id}")
     user_states[user_id] = STATE_WAITING_FOR_CAR_NUMBER
 
     logging.info(f"👤 New user started the bot: {user_id}")
@@ -98,6 +136,7 @@ async def handle_message(update: Update, context: CallbackContext):
         await update.message.reply_text("⚠️ שלב לא מזוהה, נא להתחיל מחדש עם /start")
         logging.warning(f"⚠️ Unknown state for user {user_id}, message: {user_message}")
         return
+
 
     current_state = user_states[user_id]
     logging.info(f"🔄 User {user_id} in state: {current_state} - Received: {user_message}")
@@ -156,39 +195,68 @@ async def handle_message(update: Update, context: CallbackContext):
 
         context.user_data["driver_phone"] = user_message  # Store validated phone number
 
-        # ✅ Fetch available services
+        # ✅ Fetch available services (now includes ItemBox value)
         services = query_database("EXEC FindWorks")
 
         if services:
-            valid_service_ids = {str(row[0]): row[1] for row in services if row[0] < 11}  # ✅ Store as a dictionary (ID -> Service Name)
-            services_text = "\n".join([f"{row[0]} - {row[1]}" for row in services if row[0] < 11])
+            valid_service_ids = {}  # Dictionary: {Service ID -> (Service Name, ItemBox)}
+            services_text = []
+
+            for row in services:
+                service_id, service_name, itembox = row[0], row[1], row[2]  # ✅ Unpacking new ItemBox column
+                if service_id < 11:
+                    valid_service_ids[str(service_id)] = (service_name, itembox)
+                    services_text.append(f"{service_id} - {service_name}")
+
+            services_text = "\n".join(services_text)
             user_states[user_id] = STATE_WAITING_FOR_TIRE_DETAILS
 
             await update.message.reply_text(
                 f"🔧 אילו שירותים תרצה לבצע?\n{services_text}\n\n💡 יש להקליד רק את המספרים מהרשימה למעלה."
             )
             context.user_data["valid_service_ids"] = valid_service_ids  # Store valid service numbers
+
         else:
             await update.message.reply_text("❌ לא נמצאו שירותים זמינים.")
 
     elif current_state == STATE_WAITING_FOR_TIRE_DETAILS:
-        valid_service_ids = context.user_data.get("valid_service_ids", {})  # Retrieve valid service IDs as a dictionary
+        valid_service_ids = context.user_data.get("valid_service_ids", {})  # Retrieve valid services
 
         if user_message in valid_service_ids:
-            service_name = valid_service_ids[user_message]  # ✅ Retrieve service name from the dictionary
-            context.user_data["selected_service"] = service_name  # Store the service for reference
+            service_name, itembox = valid_service_ids[user_message]  # ✅ Extract service name and ItemBox
+            context.user_data["selected_service"] = service_name  # Store selected service
+            context.user_data["selected_service_id"] = user_message  # Store selected service ID
+            context.user_data["itembox"] = itembox  # Store ItemBox status
 
-            if service_name.startswith("צמיג"):  # ✅ Check if the service is related to tires
-                user_states[user_id] = STATE_WAITING_FOR_TIRE_QUANTITY
-                await update.message.reply_text("🔢 כמה צמיגים תרצה להחליף? (1-20)")
-                logging.info(f"🔍 User {user_id} selected tire service: {service_name}")
-            else:
-                user_states[user_id] = STATE_WAITING_FOR_MILEAGE
-                await update.message.reply_text("📏 הקלד את מספר הק״מ של הרכב:")
-                logging.info(f"🔍 User {user_id} selected non-tire service: {service_name}")
+            if itembox == 1:  # ✅ If service requires work order, ask for it first
+                user_states[user_id] = STATE_WAITING_FOR_WORK_ORDER
+                await update.message.reply_text("📄 יש להזין מספר פקודת עבודה:")
+                logging.info(f"🔍 User {user_id} selected {service_name} (ItemBox = 1), requesting work order.")
+                return
+
+            # ✅ If ItemBox is 1, ask for tire quantity, otherwise move to tire position
+            user_states[user_id] = STATE_WAITING_FOR_TIRE_QUANTITY if itembox == 1 else STATE_WAITING_FOR_TIRE_POSITION
+            next_message = "🔢 כמה צמיגים תרצה להחליף? (1-20)" if itembox == 1 else "🚗 איפה נמצא הצמיג? \n1️⃣ - קדמי \n2️⃣ - אחורי"
+            await update.message.reply_text(next_message)
+            logging.info(f"🔍 User {user_id} selected service {service_name}, proceeding to {'tire quantity' if itembox == 1 else 'tire position'}.")
+
         else:
             await update.message.reply_text("❌ הבחירה שלך אינה תקפה. אנא הקלד מספר מתוך הרשימה שהוצגה.")
             logging.warning(f"⚠️ Invalid service selection from user {user_id}: {user_message}")
+
+    elif current_state == STATE_WAITING_FOR_WORK_ORDER:
+        if not user_message.isdigit():
+            await update.message.reply_text("❌ מספר פקודת עבודה לא תקין. נא להזין מספר חוקי.")
+            logging.warning(f"⚠️ Invalid work order number from user {user_id}: {user_message}")
+            return
+
+        context.user_data["work_order_number"] = user_message  # ✅ Store work order number
+
+        # ✅ If the service requires tire replacement, ask for tire quantity, else ask for tire position
+        user_states[user_id] = STATE_WAITING_FOR_TIRE_QUANTITY if context.user_data["itembox"] == 1 else STATE_WAITING_FOR_TIRE_POSITION
+        next_message = "🔢 כמה צמיגים תרצה להחליף? (1-20)" if context.user_data["itembox"] == 1 else "🚗 איפה נמצא הצמיג? \n1️⃣ - קדמי \n2️⃣ - אחורי"
+        await update.message.reply_text(next_message)
+        logging.info(f"✅ User {user_id} provided work order, proceeding to {'tire quantity' if context.user_data['itembox'] == 1 else 'tire position'}.")
 
     elif current_state == STATE_WAITING_FOR_TIRE_QUANTITY:
         if not user_message.isdigit():
@@ -226,13 +294,85 @@ async def handle_message(update: Update, context: CallbackContext):
             return
 
         context.user_data["axle_position"] = "פנימי" if user_message == "1" else "חיצוני"
-        user_states[user_id] = STATE_WAITING_FOR_IMAGES  # ✅ Now move to image upload
-        await update.message.reply_text("📸 שלח תמונה של הצמיגים להחלפה.")
-        logging.info(f"✅ User {user_id} selected axle position: {context.user_data['axle_position']}, proceeding to image upload.")
+        user_states[user_id] = STATE_WAITING_FOR_IMAGES  # ✅ Move to image upload
+        context.user_data["image_urls"] = []  # ✅ Initialize an empty list to store image URLs
+
+        await update.message.reply_text("📸 שלח בין 2 ל-6 תמונות של הצמיגים הדורשים תיקון או החלפה.")
+        logging.info(f"✅ User {user_id} selected axle position: {context.user_data['axle_position']}, awaiting images.")
+
+
 
     elif current_state == STATE_WAITING_FOR_IMAGES:
-        user_states[user_id] = STATE_WAITING_FOR_MILEAGE  # ✅ Now ask for mileage after all צמיגים questions
-        await update.message.reply_text("📏 הקלד את מספר הק״מ של הרכב (ספרות בלבד).")
+        """
+        Receives an image from the user, downloads it, and uploads it to Google Cloud.
+        """
+        try:
+            user_id = update.message.chat_id
+
+            # ✅ Ensure the message contains a photo
+            if not update.message.photo:
+                await update.message.reply_text("❌ עליך לשלוח תמונה (לא טקסט).")
+                logging.warning(f"⚠️ User {user_id} tried to send a non-image message in STATE_WAITING_FOR_IMAGES.")
+                return
+
+            # ✅ Initialize image storage if missing
+            if "image_urls" not in context.user_data:
+                context.user_data["image_urls"] = []
+
+            # ✅ Check if user already uploaded 6 images
+            if len(context.user_data["image_urls"]) >= 6:
+                await update.message.reply_text("❌ ניתן להעלות עד 6 תמונות בלבד.")
+                logging.warning(f"⚠️ User {user_id} exceeded max image uploads (6).")
+                return
+
+            # ✅ Get the highest-resolution image
+            photo = update.message.photo[-1]
+            file_id = photo.file_id
+
+            # ✅ Get the Telegram file info
+            file_info = await context.bot.get_file(file_id)
+            logging.info(f"📸 DEBUG: Received file_info: {file_info}")
+
+            # ✅ Generate a unique filename using UUID
+            unique_filename = f"{user_id}_{uuid.uuid4()}.jpg"
+            file_path = f"images/{unique_filename}"
+
+            # ✅ Correctly use the file path from Telegram (No URL duplication!)
+            download_url = file_info.file_path  # 🔹 FIXED: Directly using the correct file path
+            logging.info(f"🔍 DEBUG: Corrected download URL: {download_url}")
+
+            # ✅ Download the file
+            response = requests.get(download_url)
+            if response.status_code == 200:
+                with open(file_path, 'wb') as f:
+                    f.write(response.content)
+                logging.info(f"✅ DEBUG: Image downloaded successfully: {file_path}")
+            else:
+                logging.error(f"❌ ERROR: Failed to download file. HTTP Status: {response.status_code}")
+                await update.message.reply_text("❌ לא ניתן להוריד את התמונה.")
+                return
+
+            # ✅ Upload to Google Cloud Storage
+            uploaded_url = upload_image_to_gcs(file_path, unique_filename)
+
+            if uploaded_url:
+                context.user_data["image_urls"].append(uploaded_url)  # Store the uploaded URL
+                logging.info(f"✅ DEBUG: Image uploaded for {user_id}: {uploaded_url}")
+
+            # ✅ Validate number of images uploaded
+            num_images = len(context.user_data["image_urls"])
+
+            if num_images >= 2:
+                user_states[user_id] = STATE_WAITING_FOR_MILEAGE  # ✅ Move to mileage input
+                await update.message.reply_text("✅ כל התמונות הועלו בהצלחה! \n📏 הקלד את מספר הק״מ של הרכב (ספרות בלבד).")
+                logging.info(f"✅ DEBUG: User {user_id} uploaded {num_images} images, moving to mileage entry.")
+            else:
+                await update.message.reply_text(f"📸 תמונה נשמרה. שלח עוד {2 - num_images} לפחות.")
+
+        except Exception as e:
+            logging.error(f"❌ ERROR: {e}")
+            await update.message.reply_text("❌ שגיאה כללית. נסה לשלוח את התמונה שוב.")
+
 
     elif current_state == STATE_WAITING_FOR_MILEAGE:
         # ✅ Allow numbers with up to two decimal places (e.g., 10.5, 123.45)
@@ -327,41 +467,77 @@ async def handle_message(update: Update, context: CallbackContext):
             context.user_data["selected_date"] = selected_date
             branch_name = context.user_data["selected_tire_shop"].strip()
 
-            # ✅ Fetch Branch ID (ensure we have the correct pancheria)
+            # ✅ Fetch Branch ID based on the selected pancheria
             branch_id_result = query_database("SELECT BranchID FROM dbo.Branchs WHERE RTRIM(LTRIM(Name)) = ?", (branch_name,))
 
             if not branch_id_result:
                 await update.message.reply_text("❌ שגיאה: לא נמצא מזהה פנצריה מתאים.")
-                logging.error(f"❌ Branch ID not found for: {branch_name}")
+                logging.error(f"❌ ERROR: Branch ID not found for pancheria '{branch_name}'")
                 return
 
             branch_id = branch_id_result[0][0]  # Extract the integer BranchID
+            context.user_data["branch_id"] = branch_id  # ✅ Store branch ID for later use
 
             # ✅ Convert date to SQL format ("YYYY-MM-DD")
             selected_date_str = selected_date.strftime("%Y-%m-%d")
 
-            # ✅ Fetch available times using the stored procedure (now filters by date AND pancheria)
-            available_times = query_database("EXEC [dbo].[FindTmpTime] ?, ?", (selected_date_str, branch_id))
+            # ✅ Debug log before calling SQL procedure
+            logging.info(f"🔍 DEBUG: Selected BranchID: {branch_id} for pancheria '{branch_name}' on {selected_date_str}")
 
-            if available_times:
-                # ✅ Convert times to HH:MM and store them in a dictionary with a numeric choice
-                formatted_times = [datetime.strptime(row[0].split(".")[0], "%H:%M:%S").strftime("%H:%M") for row in available_times]
-                time_choices = {str(i + 1): formatted_times[i] for i in range(len(formatted_times))}
+            # ✅ Ask the user for morning/afternoon preference
+            user_states[user_id] = STATE_WAITING_FOR_TIME_PREFERENCE
+            await update.message.reply_text("⏰ מתי נוח לך יותר?\n1️⃣ - לפני הצהריים (עד 12)\n2️⃣ - אחרי הצהריים (מ-12)")
+            logging.info(f"✅ User {user_id} selected date {selected_date_str}, awaiting time preference.")
 
-                # ✅ Format the message with numbers (RTL for Hebrew)
-                times_text = "\n".join([f"{time} - {i+1}" for i, time in enumerate(formatted_times)])
-
-                # ✅ Store the mapping so we can validate user input
-                context.user_data["available_times"] = time_choices
-
-                user_states[user_id] = STATE_WAITING_FOR_TIME
-                await update.message.reply_text(f"⏰ זמני פגישה זמינים ל-{clean_date}:\n{times_text}\n\n🔹 אנא בחר מספר מהרשימה.")
-            else:
-                await update.message.reply_text("❌ לא נמצאו זמני פגישה זמינים בתאריך זה. נסה תאריך אחר.")
-                logging.warning(f"⚠️ No available times for user {user_id} on {selected_date}.")
         except ValueError as e:
             await update.message.reply_text("❌ פורמט תאריך לא תקין. נא להזין תאריך בפורמט יום-חודש-שנה (למשל: 07-03-2025).")
             logging.error(f"❌ Date parsing error for user {user_id}: {user_message} | Error: {e}")
+
+    elif current_state == STATE_WAITING_FOR_TIME_PREFERENCE:
+        if user_message not in ["1", "2"]:
+            await update.message.reply_text("❌ בחירה לא חוקית. יש לבחור: \n1️⃣ - לפני הצהריים (עד 12)\n2️⃣ - אחרי הצהריים (מ-12)")
+            logging.warning(f"⚠️ Invalid time preference selection from user {user_id}: {user_message}")
+            return
+
+        time_preference = "morning" if user_message == "1" else "afternoon"
+        context.user_data["time_preference"] = time_preference  # ✅ Store time preference
+
+        selected_date_str = context.user_data["selected_date"].strftime("%Y-%m-%d")
+        branch_id = context.user_data["branch_id"]
+
+        # ✅ Fetch available times using the stored procedure (filters by date & branch)
+        available_times = query_database("EXEC [dbo].[FindTmpTime] ?, ?", (selected_date_str, branch_id))
+
+        if available_times:
+            # ✅ Convert times to HH:MM format
+            formatted_times = [datetime.strptime(row[0].split(".")[0], "%H:%M:%S").strftime("%H:%M") for row in available_times]
+
+            # ✅ Filter times based on user preference
+            if time_preference == "morning":
+                filtered_times = [t for t in formatted_times if int(t.split(":")[0]) < 12]
+            else:
+                filtered_times = [t for t in formatted_times if int(t.split(":")[0]) >= 12]
+
+            if not filtered_times:  # ✅ If no available slots in chosen period
+                await update.message.reply_text("❌ אין זמינות בשעות שבחרת. נסה לבחור שעה אחרת.")
+                logging.warning(f"⚠️ No available times for user {user_id} in {time_preference}.")
+                return
+
+            # ✅ Store only the filtered times
+            time_choices = {str(i + 1): filtered_times[i] for i in range(len(filtered_times))}
+            context.user_data["available_times"] = time_choices  # ✅ Store for validation
+
+            # ✅ Format the message with numbers
+            times_text = "\n".join([f"{time} - {i+1}" for i, time in enumerate(filtered_times)])
+
+            user_states[user_id] = STATE_WAITING_FOR_TIME
+            await update.message.reply_text(f"⏰ זמני פגישה זמינים ל-{selected_date_str}:\n{times_text}\n\n🔹 אנא בחר מספר מהרשימה.")
+            logging.info(f"✅ User {user_id} selected {time_preference}, displaying available times.")
+
+        else:
+            await update.message.reply_text("❌ לא נמצאו זמני פגישה זמינים בתאריך זה. נסה תאריך אחר.")
+            logging.warning(f"⚠️ No available times for user {user_id} on {selected_date_str}.")
+
 
 
     elif current_state == STATE_WAITING_FOR_TIME:
@@ -393,15 +569,6 @@ async def handle_message(update: Update, context: CallbackContext):
         else:
             await update.message.reply_text("❌ המספר שנבחר אינו תקף. אנא בחר מספר מהרשימה.")
             logging.warning(f"⚠️ Invalid time selection from user {user_id}: {user_message}")
-
-
-
-
-
-
-
-    
-    
 
 
     elif current_state == STATE_WAITING_FOR_APPOINTMENT:

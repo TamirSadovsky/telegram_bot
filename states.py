@@ -15,3 +15,6 @@ STATE_WAITING_FOR_TIRE_SHOP = "waiting_for_tire_shop"
 STATE_WAITING_FOR_APPOINTMENT = "waiting_for_appointment"
 STATE_WAITING_FOR_AXLE_POSITION = "waiting for axle position"
 STATE_WAITING_FOR_TIRE_POSITION = "waiting for tire position"
+STATE_WAITING_FOR_DATE = "waiting_for_date"
+STATE_WAITING_FOR_TIME = "waiting_for_time"
+

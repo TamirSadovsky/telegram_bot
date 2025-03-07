@@ -5,6 +5,68 @@ from database import query_database
 from states import *
 import re
 from validators import is_valid_israeli_phone, is_valid_hebrew_name, is_valid_mileage
+import datetime
+from datetime import datetime
+import urllib.parse
+import requests
+import logging
+
+GOOGLE_MAPS_API_KEY = "AIzaSyAWODnL_x9dbeoVV5vH0uVY7XIAjpfqZR0"  # 🔹 Replace with your API key
+
+def get_best_location(query):
+    """
+    Searches Google Maps API to get the best possible location based on a pancheria name or address.
+    """
+    base_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    params = {
+        "query": query,
+        "key": GOOGLE_MAPS_API_KEY
+    }
+
+    try:
+        response = requests.get(base_url, params=params)
+        data = response.json()
+
+        if data["status"] == "OK":
+            best_result = data["results"][0]["formatted_address"]
+            return best_result
+        else:
+            logging.warning(f"⚠️ Google Maps API returned no results for query: {query}")
+            return query  # Fallback to original query if no results found
+
+    except Exception as e:
+        logging.error(f"❌ Error fetching location from Google Maps API: {e}")
+        return query  # Fallback in case of API failure
+
+def generate_navigation_links(tire_shop_name):
+    """ Generates Google Maps and Waze navigation links using the best possible query """
+
+    # ✅ Clean and format the name
+    formatted_name = urllib.parse.quote(tire_shop_name)
+
+    # ✅ Try extracting an address from the name
+    if "(" in tire_shop_name and ")" in tire_shop_name:
+        extracted_address = tire_shop_name.split("(")[-1].replace(")", "").strip()
+    elif "-" in tire_shop_name:
+        extracted_address = tire_shop_name.split("-")[-1].strip()
+    else:
+        extracted_address = None
+
+    # ✅ Use the best location available
+    if extracted_address:
+        best_location = get_best_location(extracted_address)  # Get precise location from Google
+    else:
+        best_location = get_best_location(tire_shop_name)  # Try searching the shop name
+
+    # ✅ URL encode for maps & waze
+    query = urllib.parse.quote(best_location)
+
+    # ✅ Generate the links
+    google_maps_link = f"https://www.google.com/maps/search/?api=1&query={query}"
+    waze_link = f"https://waze.com/ul?q={query}"
+
+    return google_maps_link, waze_link
+
 
 
 
@@ -234,25 +296,112 @@ async def handle_message(update: Update, context: CallbackContext):
             selected_tire_shop = valid_tire_shop_ids[user_message]  # Get the tire shop name
             context.user_data["selected_tire_shop"] = selected_tire_shop
 
-            # ✅ Always use shop name for Google Maps & Waze
-            google_maps_link = f"https://www.google.com/maps/search/?api=1&query={selected_tire_shop.replace(' ', '+')}"
-            waze_link = f"https://waze.com/ul?q={selected_tire_shop.replace(' ', '+')}"
-
-            # ✅ Send response with navigation options
-            await update.message.reply_text(
-                f"📍 פנצריה {selected_tire_shop} נבחרה.\n\n"
-                f"🔗 [לחץ כאן לניווט עם Google Maps]({google_maps_link})\n"
-                f"🔗 [לחץ כאן לניווט עם Waze]({waze_link})\n\n"
-                "📅 בחר תאריך ושעה לטיפול.",
-                parse_mode="Markdown"
-            )
-
-            logging.info(f"✅ User {user_id} selected tire shop: {selected_tire_shop}, sent navigation links.")
-            user_states[user_id] = STATE_WAITING_FOR_APPOINTMENT
+            # ✅ Ask for a date before sending navigation links
+            user_states[user_id] = STATE_WAITING_FOR_DATE
+            await update.message.reply_text("📅 אנא הזן תאריך לפגישה (יום-חודש-שנה), למשל: 07-03-2025")
+            logging.info(f"✅ User {user_id} selected tire shop: {selected_tire_shop}, asking for appointment date.")
 
         else:
             await update.message.reply_text("❌ הבחירה שלך אינה תקפה. אנא הקלד מספר פנצריה מתוך הרשימה.")
             logging.warning(f"⚠️ Invalid tire shop selection from user {user_id}: {user_message}")
+
+    elif current_state == STATE_WAITING_FOR_DATE:
+        try:
+            # ✅ Log raw input for debugging
+            logging.info(f"📅 Raw user input for date: '{user_message}' (length: {len(user_message)})")
+
+            # ✅ Remove unexpected characters and decimals
+            import re
+            clean_date = re.sub(r"[^\d-]", "", user_message.strip().split(".")[0])
+
+            # ✅ Parse the date explicitly as DD-MM-YYYY
+            selected_date = datetime.strptime(clean_date, "%d-%m-%Y").date()
+
+            today = datetime.today().date()
+
+            if selected_date < today:
+                await update.message.reply_text("❌ התאריך אינו חוקי. אנא הזן תאריך עתידי (למשל: 07-03-2025).")
+                logging.warning(f"⚠️ Invalid past date from user {user_id}: {selected_date}")
+                return
+
+            context.user_data["selected_date"] = selected_date
+            branch_name = context.user_data["selected_tire_shop"].strip()
+
+            # ✅ Fetch Branch ID (ensure we have the correct pancheria)
+            branch_id_result = query_database("SELECT BranchID FROM dbo.Branchs WHERE RTRIM(LTRIM(Name)) = ?", (branch_name,))
+
+            if not branch_id_result:
+                await update.message.reply_text("❌ שגיאה: לא נמצא מזהה פנצריה מתאים.")
+                logging.error(f"❌ Branch ID not found for: {branch_name}")
+                return
+
+            branch_id = branch_id_result[0][0]  # Extract the integer BranchID
+
+            # ✅ Convert date to SQL format ("YYYY-MM-DD")
+            selected_date_str = selected_date.strftime("%Y-%m-%d")
+
+            # ✅ Fetch available times using the stored procedure (now filters by date AND pancheria)
+            available_times = query_database("EXEC [dbo].[FindTmpTime] ?, ?", (selected_date_str, branch_id))
+
+            if available_times:
+                # ✅ Convert times to HH:MM and store them in a dictionary with a numeric choice
+                formatted_times = [datetime.strptime(row[0].split(".")[0], "%H:%M:%S").strftime("%H:%M") for row in available_times]
+                time_choices = {str(i + 1): formatted_times[i] for i in range(len(formatted_times))}
+
+                # ✅ Format the message with numbers (RTL for Hebrew)
+                times_text = "\n".join([f"{time} - {i+1}" for i, time in enumerate(formatted_times)])
+
+                # ✅ Store the mapping so we can validate user input
+                context.user_data["available_times"] = time_choices
+
+                user_states[user_id] = STATE_WAITING_FOR_TIME
+                await update.message.reply_text(f"⏰ זמני פגישה זמינים ל-{clean_date}:\n{times_text}\n\n🔹 אנא בחר מספר מהרשימה.")
+            else:
+                await update.message.reply_text("❌ לא נמצאו זמני פגישה זמינים בתאריך זה. נסה תאריך אחר.")
+                logging.warning(f"⚠️ No available times for user {user_id} on {selected_date}.")
+        except ValueError as e:
+            await update.message.reply_text("❌ פורמט תאריך לא תקין. נא להזין תאריך בפורמט יום-חודש-שנה (למשל: 07-03-2025).")
+            logging.error(f"❌ Date parsing error for user {user_id}: {user_message} | Error: {e}")
+
+
+    elif current_state == STATE_WAITING_FOR_TIME:
+        available_times = context.user_data.get("available_times", {})
+
+        if user_message in available_times:
+            selected_time = available_times[user_message]
+            context.user_data["selected_time"] = selected_time  # Store selected time
+
+            # ✅ Get the pancheria name
+            tire_shop_name = context.user_data["selected_tire_shop"]
+
+            # ✅ Generate accurate navigation links
+            google_maps_link, waze_link = generate_navigation_links(tire_shop_name)
+
+            # ✅ Convert the selected date back to DD-MM-YYYY format
+            selected_date_str = context.user_data["selected_date"].strftime("%d-%m-%Y")
+
+            # ✅ Now send the navigation links
+            await update.message.reply_text(
+                f"✅ הפגישה נקבעה בהצלחה!\n📅 תאריך: {selected_date_str}\n⏰ שעה: {selected_time}\n🏪 פנצריה: {tire_shop_name}\n\n"
+                f"🔗 [לחץ כאן לניווט עם Google Maps]({google_maps_link})\n"
+                f"🔗 [לחץ כאן לניווט עם Waze]({waze_link})",
+                parse_mode="Markdown"
+            )
+
+            logging.info(f"✅ User {user_id} booked appointment on {selected_date_str} at {selected_time}")
+            user_states.pop(user_id)  # Clear state after completion
+        else:
+            await update.message.reply_text("❌ המספר שנבחר אינו תקף. אנא בחר מספר מהרשימה.")
+            logging.warning(f"⚠️ Invalid time selection from user {user_id}: {user_message}")
+
+
+
+
+
+
+
+    
+    
 
 
     elif current_state == STATE_WAITING_FOR_APPOINTMENT:

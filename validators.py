@@ -14,8 +14,14 @@ async def is_valid_israeli_phone(number: str) -> bool:
 async def is_valid_hebrew_name(name: str) -> bool:
     """Check if the name contains only Hebrew letters."""
     pattern = r"^[א-ת\s]+$"
-    return bool(re.match(pattern, name))
+    return bool(re.match(pattern, name)) and is_valid_name_length(name)
 
-def is_valid_mileage(mileage: str) -> bool:
+async def is_valid_mileage(mileage: str) -> bool:
     """Check if mileage is a valid float with up to 2 decimal places."""
     return bool(re.match(r"^\d+(\.\d{1,2})?$", mileage))
+
+def is_valid_name_length(name: str) -> bool:
+    """Check if the name from length greater than 1."""
+    return len(name) > 1
+
+

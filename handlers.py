@@ -15,6 +15,7 @@ from datetime import timedelta
 from google.cloud import storage
 from config import TOKEN
 import uuid
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 
 
 # ✅ Set your Google Cloud Storage bucket name
@@ -137,30 +138,46 @@ async def handle_message(update: Update, context: CallbackContext):
         logging.warning(f"⚠️ Unknown state for user {user_id}, message: {user_message}")
         return
 
-
     current_state = user_states[user_id]
     logging.info(f"🔄 User {user_id} in state: {current_state} - Received: {user_message}")
 
     if current_state == STATE_WAITING_FOR_CAR_NUMBER:
-        result = query_database("EXEC FindCarNumForBot ?", (user_message,))
+        result = query_database("SELECT * FROM [Ram].[dbo].[Cars] WHERE [CarNum] = ?", (user_message,))
+
         if result:
-            car_data = result[0]  # Assuming first row contains the relevant data
+            car_data = result[0]  # First row
 
-            # ✅ Dynamically filter out `None` values
-            car_details = [str(car_data[i]) for i in [4, 7] if car_data[i] is not None]
+            # ✅ Extract and store only the required data
+            context.user_data["car_number"] = car_data[6]  # CarNum
+            context.user_data["car_type"] = car_data[3]  # TypeOfCar
+            context.user_data["tire_type"] = car_data[7]  # TireType
 
-            # ✅ Construct message only with existing values
-            car_info_text = " - ".join(car_details) if car_details else "פרטים לא זמינים"
+            # ✅ Construct car details message dynamically (Only Include Non-Empty Values)
+            car_details_list = [
+                f"מספר רכב: {context.user_data['car_number']}" if context.user_data["car_number"] else None,
+                f"סוג רכב: {context.user_data['car_type']}" if context.user_data["car_type"] else None,
+                f"סוג צמיג: {context.user_data['tire_type']}" if context.user_data["tire_type"] else None,
+            ]
+
+            # ✅ Remove None values before joining the message
+            car_info_text = "\n".join([detail for detail in car_details_list if detail])
 
             user_states[user_id] = STATE_WAITING_FOR_CONFIRMATION
             await update.message.reply_text(
-                f"✅ כלי הרכב אומת: {car_info_text}\n"
-                "האם לאשר? (כן/לא)", parse_mode="HTML"
+                f"✅ כלי הרכב אומת:\n{car_info_text}\n\nהאם לאשר? (כן/לא)", parse_mode="HTML"
             )
-            logging.info(f"✅ Car verified for user {user_id}: {car_info_text}")
+
+            logging.info(f"✅ Car verified for user {user_id}: {context.user_data}")
+
         else:
-            await update.message.reply_text("❌ כלי רכב זה אינו מופיע במערכת.")
+            await update.message.reply_text(
+                "❌ כלי רכב זה אינו מופיע במערכת או שהמספר שהוקלד שגוי.\n"
+                "🔹 אנא בקש מקצין הרכב להוסיף את הרכב למערכת."
+            )
             logging.warning(f"❌ Car verification failed for user {user_id}: {user_message}")
+
+
+
 
     elif current_state == STATE_WAITING_FOR_CONFIRMATION:
         if user_message.lower() == "כן":
@@ -173,10 +190,12 @@ async def handle_message(update: Update, context: CallbackContext):
             await update.message.reply_text("⚠️ נא להזין 'כן' או 'לא' בלבד.")
 
 
+
+
     elif current_state == STATE_WAITING_FOR_DRIVER_DETAILS:
         # ✅ בדיקת שם חוקי בעברית בלבד
         if not await is_valid_hebrew_name(user_message):
-            await update.message.reply_text("❌ שם הנהג לא תקין. יש להזין שם המכיל רק אותיות בעברית.")
+            await update.message.reply_text("❌ שם הנהג לא תקין. יש להזין שם בעברית המכיל לפחות שתי אותיות.")
             logging.warning(f"⚠️ Invalid driver name from user {user_id}: {user_message}")
             return
 
@@ -297,92 +316,126 @@ async def handle_message(update: Update, context: CallbackContext):
         user_states[user_id] = STATE_WAITING_FOR_IMAGES  # ✅ Move to image upload
         context.user_data["image_urls"] = []  # ✅ Initialize an empty list to store image URLs
 
-        await update.message.reply_text("📸 שלח בין 2 ל-6 תמונות של הצמיגים הדורשים תיקון או החלפה.")
+        await update.message.reply_text("📸 שלח תמונה אחת בכל הודעה. יש לשלוח בין 2 ל-6 תמונות של הצמיגים הדורשים תיקון או החלפה.")
+
         logging.info(f"✅ User {user_id} selected axle position: {context.user_data['axle_position']}, awaiting images.")
 
 
 
     elif current_state == STATE_WAITING_FOR_IMAGES:
         """
-        Receives an image from the user, downloads it, and uploads it to Google Cloud.
+        Handles one image per message, ensures correct counting,
+        and allows user to type "סיימתי" to finish.
         """
         try:
             user_id = update.message.chat_id
+            user_message = update.message.text  # Check if it's text
 
-            # ✅ Ensure the message contains a photo
+            # ✅ Handling "סיימתי" message to finish uploading
+            if user_message and user_message.strip().lower() == "סיימתי":
+                stored_images = len(context.user_data.get("images", []))
+
+                # ✅ Validate that the user uploaded at least 2 images before finishing
+                if stored_images < 2:
+                    error_msg = (
+                        "❌ יש להעלות לפחות 2 תמונות לפני השלמת השלב."
+                        if stored_images > 0
+                        else "❌ אין תמונות שהועלו. יש לשלוח לפחות 2 תמונות לפני השלמת השלב."
+                    )
+                    await update.message.reply_text(error_msg)
+                    logging.warning(f"⚠️ User {user_id} tried to finish image upload with only {stored_images} images.")
+                    return
+
+                # ✅ Proceed to the next step
+                user_states[user_id] = STATE_WAITING_FOR_MILEAGE
+                await update.message.reply_text("✅ כל התמונות נשמרו בהצלחה!")
+                await update.message.reply_text("📏 הקלד את מספר הק״מ של הרכב:")
+
+                logging.info(f"✅ DEBUG: User {user_id} confirmed image upload with {stored_images} images, moving to mileage entry.")
+                return
+
+            # ✅ Reject text messages (except "סיימתי")
             if not update.message.photo:
-                await update.message.reply_text("❌ עליך לשלוח תמונה (לא טקסט).")
-                logging.warning(f"⚠️ User {user_id} tried to send a non-image message in STATE_WAITING_FOR_IMAGES.")
+                await update.message.reply_text("❌ עליך לשלוח תמונה אחת בכל הודעה או להקליד 'סיימתי' לסיום.")
+                logging.warning(f"⚠️ User {user_id} sent an invalid message in STATE_WAITING_FOR_IMAGES.")
                 return
 
             # ✅ Initialize image storage if missing
-            if "image_urls" not in context.user_data:
-                context.user_data["image_urls"] = []
+            if "images" not in context.user_data:
+                context.user_data["images"] = []
 
-            # ✅ Check if user already uploaded 6 images
-            if len(context.user_data["image_urls"]) >= 6:
-                await update.message.reply_text("❌ ניתן להעלות עד 6 תמונות בלבד.")
-                logging.warning(f"⚠️ User {user_id} exceeded max image uploads (6).")
+            # ✅ Extract all images from the message
+            images_received = update.message.photo[-1:]  # Takes only the highest quality per image
+            num_images_sent = len(images_received)
+            stored_images = len(context.user_data["images"])  # Already stored images
+            total_after_upload = stored_images + num_images_sent  # Expected total after storing
+
+            logging.info(f"📸 DEBUG: User {user_id} sent {num_images_sent} image(s). Total after this batch would be {total_after_upload}.")
+
+            # ✅ If the user tries to upload more than 6 images, notify them
+            if total_after_upload > 6:
+                await update.message.reply_text("⚠️ ניתן להעלות עד 6 תמונות בלבד. רק 6 התמונות הראשונות יישמרו.")
+                logging.warning(f"⚠️ User {user_id} tried to exceed 6 images. Saving only the first 6.")
+
+                # ✅ Store only the first remaining images up to the limit of 6
+                images_to_store = 6 - stored_images
+                images_received = images_received[:images_to_store]
+
+            # ✅ Process and temporarily store images
+            for i, photo in enumerate(images_received):
+                file_id = photo.file_id
+                unique_filename = f"{user_id}_{uuid.uuid4()}.jpg"
+                destination_blob_name = f"{user_id}/{unique_filename}"  # ✅ Structure for Google Cloud Storage
+
+                # ✅ Save image metadata for later upload
+                image_data = {
+                    "file_id": file_id,
+                    "filename": unique_filename,
+                    "destination_blob_name": destination_blob_name  # ✅ Use for uploading later
+                }
+                context.user_data["images"].append(image_data)
+
+            # ✅ Debugging: Print the entire stored images list
+            logging.info(f"📸 DEBUG: Updated image list for user {user_id}: {context.user_data['images']}")
+
+            # ✅ Update stored image count after processing
+            stored_images = len(context.user_data["images"])
+
+            # ✅ If exactly 6 images were uploaded, move to the next step automatically
+            if stored_images == 6:
+                user_states[user_id] = STATE_WAITING_FOR_MILEAGE
+                await update.message.reply_text("✅ כל התמונות נשמרו בהצלחה! עוברים לשלב הבא.")
+                await update.message.reply_text("📏 הקלד את מספר הק״מ של הרכב:")
+                logging.info(f"✅ DEBUG: User {user_id} reached max 6 images, moving to mileage entry.")
                 return
 
-            # ✅ Get the highest-resolution image
-            photo = update.message.photo[-1]
-            file_id = photo.file_id
-
-            # ✅ Get the Telegram file info
-            file_info = await context.bot.get_file(file_id)
-            logging.info(f"📸 DEBUG: Received file_info: {file_info}")
-
-            # ✅ Generate a unique filename using UUID
-            unique_filename = f"{user_id}_{uuid.uuid4()}.jpg"
-            file_path = f"images/{unique_filename}"
-
-            # ✅ Correctly use the file path from Telegram (No URL duplication!)
-            download_url = file_info.file_path  # 🔹 FIXED: Directly using the correct file path
-            logging.info(f"🔍 DEBUG: Corrected download URL: {download_url}")
-
-            # ✅ Download the file
-            response = requests.get(download_url)
-            if response.status_code == 200:
-                with open(file_path, 'wb') as f:
-                    f.write(response.content)
-                logging.info(f"✅ DEBUG: Image downloaded successfully: {file_path}")
-            else:
-                logging.error(f"❌ ERROR: Failed to download file. HTTP Status: {response.status_code}")
-                await update.message.reply_text("❌ לא ניתן להוריד את התמונה.")
+            # ✅ If less than 2 images are stored, ask for more
+            if stored_images < 2:
+                await update.message.reply_text(f"📸 תמונה נשמרה. שלח עוד {2 - stored_images} לפחות.")
                 return
 
-            # ✅ Upload to Google Cloud Storage
-            uploaded_url = upload_image_to_gcs(file_path, unique_filename)
-
-            if uploaded_url:
-                context.user_data["image_urls"].append(uploaded_url)  # Store the uploaded URL
-                logging.info(f"✅ DEBUG: Image uploaded for {user_id}: {uploaded_url}")
-
-            # ✅ Validate number of images uploaded
-            num_images = len(context.user_data["image_urls"])
-
-            if num_images >= 2:
-                user_states[user_id] = STATE_WAITING_FOR_MILEAGE  # ✅ Move to mileage input
-                await update.message.reply_text("✅ כל התמונות הועלו בהצלחה! \n📏 הקלד את מספר הק״מ של הרכב (ספרות בלבד).")
-                logging.info(f"✅ DEBUG: User {user_id} uploaded {num_images} images, moving to mileage entry.")
-            else:
-                await update.message.reply_text(f"📸 תמונה נשמרה. שלח עוד {2 - num_images} לפחות.")
+            # ✅ Otherwise, remind user they can type "סיימתי"
+            await update.message.reply_text("📸 תמונה נשמרה! ניתן להעלות עוד תמונות או להקליד 'סיימתי' לסיום.")
 
         except Exception as e:
             logging.error(f"❌ ERROR: {e}")
             await update.message.reply_text("❌ שגיאה כללית. נסה לשלוח את התמונה שוב.")
 
 
+
+
     elif current_state == STATE_WAITING_FOR_MILEAGE:
-        # ✅ Allow numbers with up to two decimal places (e.g., 10.5, 123.45)
-        if not is_valid_mileage(user_message):
+        """
+        Handles mileage input, ensuring it is valid before proceeding.
+        """
+        if not await is_valid_mileage(user_message):
             await update.message.reply_text("❌ יש להזין מספר תקין (לדוגמה: 123 או 123.45).")
             logging.warning(f"⚠️ Invalid mileage input from user {user_id}: {user_message}")
             return
 
         context.user_data["mileage"] = float(user_message)  # Convert to float before storing
         user_states[user_id] = STATE_WAITING_FOR_AREA
+        #await update.message.reply_text("✅ מספר הק״מ נשמר בהצלחה! כעת, בחר את האזור לשירות.")
 
 # ✅ Fetch available areas and store them properly
         areas = query_database("EXEC FindArea")
@@ -565,12 +618,137 @@ async def handle_message(update: Update, context: CallbackContext):
             )
 
             logging.info(f"✅ User {user_id} booked appointment on {selected_date_str} at {selected_time}")
-            user_states.pop(user_id)  # Clear state after completion
+
+            # ✅ Instead of waiting, call the final appointment scheduling function NOW
+            await save_appointment(update, context)
+
         else:
             await update.message.reply_text("❌ המספר שנבחר אינו תקף. אנא בחר מספר מהרשימה.")
             logging.warning(f"⚠️ Invalid time selection from user {user_id}: {user_message}")
 
 
-    elif current_state == STATE_WAITING_FOR_APPOINTMENT:
-        await update.message.reply_text("✅ בקשתך נקלטה!")
+
+import os
+import requests
+
+async def save_appointment(update: Update, context: CallbackContext):
+    """ Final step: Upload images to GCS and save the appointment in the database """
+    try:
+        user_id = update.message.chat_id  # ✅ Ensure user_id is defined
+
+        # ✅ Extract user data (default values if missing)
+        branch_id = context.user_data.get("branch_id", 0)
+        name = context.user_data.get("selected_tire_shop", "")
+        appointment_date = context.user_data.get("selected_date").strftime("%Y-%m-%d")
+        appointment_time = context.user_data.get("selected_time", "")
+        car_num = context.user_data.get("car_number", "")
+        type_of_car = context.user_data.get("car_type", "")
+        driver_name = context.user_data.get("driver_name", "")
+        driver_phone = context.user_data.get("driver_phone", "")
+        unit = context.user_data.get("unit", "")
+        mileage = str(context.user_data.get("mileage", "0.0"))  # Ensure it's a string
+
+        work_type_id = context.user_data.get("selected_service_id", 0)  # Default to 0 if missing
+        work_type_desc = context.user_data.get("selected_service", "")
+
+        mikom_desc = context.user_data.get("tire_position", "")
+        mikom_id = 1 if mikom_desc == 'קדמי' else 2
+
+        seren_desc = context.user_data.get("axle_position", "")
+        seren_id = 1 if seren_desc == 'פנימי' else 2
+
+        # ✅ Fetch missing IDs (SetShipmentID, CustomerID, InternalID)
+        customer_id_result = query_database("SELECT [CustomerID], [InternalID] FROM [Ram].[dbo].[Cars] WHERE [CarNum]=?", (car_num,))
+        if customer_id_result:
+            customer_id, internal_id = customer_id_result[0]
+        else:
+            customer_id, internal_id = "", ""
+
+        set_shipment_id = 0  # Default value
+
+        # ✅ Ensure /tmp directory exists
+        tmp_dir = "/tmp/"
+        os.makedirs(tmp_dir, exist_ok=True)  # Create if not exists
+
+        # ✅ Upload images to GCS and replace `file_id` with public URL
+        image_urls = []
+        images = context.user_data.get("images", [])[:6]  # Use only first 6 images
+
+        for img in images:
+            file_id = img["file_id"]
+            local_file_path = os.path.join(tmp_dir, img["filename"])  # Ensure full path
+            destination_blob_name = img["destination_blob_name"]
+
+            # ✅ Download the image from Telegram
+            file_info = await context.bot.get_file(file_id)
+            file_url = file_info.file_path  # Get direct URL from Telegram
+
+            response = requests.get(file_url)
+            if response.status_code == 200:
+                with open(local_file_path, 'wb') as f:
+                    f.write(response.content)
+                logging.info(f"✅ Image downloaded successfully: {local_file_path}")
+
+                # ✅ Upload to Google Cloud Storage
+                gcs_url = upload_image_to_gcs(local_file_path, destination_blob_name)
+
+                if gcs_url:
+                    image_urls.append(gcs_url)
+                else:
+                    image_urls.append("")  # If upload fails, store empty string
+            else:
+                logging.error(f"❌ ERROR: Failed to download file {file_url}. HTTP Status: {response.status_code}")
+                image_urls.append("")
+
+        # ✅ Fill remaining image slots with empty strings if less than 6
+        while len(image_urls) < 6:
+            image_urls.append("")
+
+        # ✅ Debugging log
+        logging.info(f"📌 DEBUG: Uploaded images to GCS: {image_urls}")
+
+        # ✅ Construct the EXEC query to match SSMS format
+        query = """
+            EXEC [dbo].[InsertBotAppointment] 
+                @BranchID = ?, @Name = ?, @AppointmentDate = ?, @AppointmentTime = ?, 
+                @CarNum = ?, @TypeOfCar = ?, @DriverName = ?, @DriverPhone = ?, 
+                @Unit = ?, @Kil = ?, @WorkTypeID = ?, @WorkTypeDes = ?, 
+                @MikomID = ?, @MikomDes = ?, @SerenID = ?, @SerenDes = ?, 
+                @Pic1 = ?, @Pic2 = ?, @Pic3 = ?, @Pic4 = ?, @Pic5 = ?, @Pic6 = ?
+        """
+
+        params = (
+            branch_id, name, appointment_date, appointment_time, car_num, type_of_car,
+            driver_name, driver_phone, unit, mileage,
+            work_type_id, work_type_desc, mikom_id, mikom_desc, 
+            seren_id, seren_desc,
+            image_urls[0], image_urls[1], image_urls[2], image_urls[3], image_urls[4], image_urls[5]
+        )
+
+        # ✅ Execute SQL query
+        result = query_database(query, params)
+
+        if result:
+            appointment_id = result[0][0]  # Extracting appointment ID
+            await update.message.reply_text(f"✅ הפגישה שלך נשמרה בהצלחה עם מזהה {appointment_id}.")
+        else:
+            await update.message.reply_text("❌ שגיאה בשמירת הפגישה. נסה שוב.")
+
+        # ✅ Final cleanup
+        user_states.pop(user_id, None)
+        context.user_data.clear()
+
+    except Exception as e:
+        logging.error(f"❌ ERROR during appointment booking: {e}")
+        await update.message.reply_text("❌ שגיאה כללית. נסה שוב מאוחר יותר.")
+
+
+
+
+
+
+
+
+
+
 

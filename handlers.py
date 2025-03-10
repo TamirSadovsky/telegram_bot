@@ -441,7 +441,7 @@ async def handle_message(update: Update, context: CallbackContext):
         Handles mileage input, ensuring it is valid before proceeding.
         """
         if not await is_valid_mileage(user_message):
-            await update.message.reply_text("❌ יש להזין מספר תקין (לדוגמה: 123 או 123.45).")
+            await update.message.reply_text("❌ יש להזין מספר בלבד. אין להשתמש באותיות או תווים מיוחדים (לדוגמה: 40500).")
             logging.warning(f"⚠️ Invalid mileage input from user {user_id}: {user_message}")
             return
 

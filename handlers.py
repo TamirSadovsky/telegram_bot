@@ -105,6 +105,7 @@ def generate_navigation_links(tire_shop_name):
 
 async def start(update: Update, context: CallbackContext):
     logging.getLogger().setLevel(logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     """Start conversation and ask for car number."""
     user_id = update.message.chat_id
 
@@ -302,6 +303,16 @@ async def handle_message(update: Update, context: CallbackContext):
             return
 
         context.user_data["tire_position"] = "קדמי" if user_message == "1" else "אחורי"
+        user_states[user_id] = STATE_WAITING_FOR_LEFT_RIGHT_POSITION  # ✅ Move to next step
+        await update.message.reply_text("🔄 איפה נמצא הצמיג? \n1️⃣ - שמאל \n2️⃣ - ימין")
+        logging.info(f"✅ User {user_id} selected left / right position: {context.user_data['tire_position']}, asking for left / right position.")
+
+    elif current_state == STATE_WAITING_FOR_LEFT_RIGHT_POSITION:
+        if user_message not in ["1", "2"]:
+            await update.message.reply_text("❌ בחירה לא חוקית. יש לבחור: \n1️⃣ - שמאל \n2️⃣ - ימין")
+            logging.warning(f"⚠️ Invalid left / right position selection from user {user_id}: {user_message}")
+            return
+        context.user_data["left_right_position"] = "ימין" if user_message == "1" else "שמאל"
         user_states[user_id] = STATE_WAITING_FOR_AXLE_POSITION  # ✅ Move to next step
         await update.message.reply_text("🔧 איפה הצמיג על הסרן? \n1️⃣ - פנימי \n2️⃣ - חיצוני")
         logging.info(f"✅ User {user_id} selected tire position: {context.user_data['tire_position']}, asking for axle position.")
@@ -330,6 +341,7 @@ async def handle_message(update: Update, context: CallbackContext):
         try:
             user_id = update.message.chat_id
             user_message = update.message.text  # Check if it's text
+            car_number = context.user_data["car_number"]
 
             # ✅ Handling "סיימתי" message to finish uploading
             if user_message and user_message.strip().lower() == "סיימתי":
@@ -384,8 +396,8 @@ async def handle_message(update: Update, context: CallbackContext):
             # ✅ Process and temporarily store images
             for i, photo in enumerate(images_received):
                 file_id = photo.file_id
-                unique_filename = f"{user_id}_{uuid.uuid4()}.jpg"
-                destination_blob_name = f"{user_id}/{unique_filename}"  # ✅ Structure for Google Cloud Storage
+                unique_filename = f"{user_id}_{car_number}_{uuid.uuid4()}.jpg"
+                destination_blob_name = f"{user_id}/{car_number}/{unique_filename}"  # ✅ Structure for Google Cloud Storage
 
                 # ✅ Save image metadata for later upload
                 image_data = {
@@ -628,9 +640,6 @@ async def handle_message(update: Update, context: CallbackContext):
 
 
 
-import os
-import requests
-
 async def save_appointment(update: Update, context: CallbackContext):
     """ Final step: Upload images to GCS and save the appointment in the database """
     try:
@@ -648,14 +657,17 @@ async def save_appointment(update: Update, context: CallbackContext):
         unit = context.user_data.get("unit", "")
         mileage = str(context.user_data.get("mileage", "0.0"))  # Ensure it's a string
 
-        work_type_id = context.user_data.get("selected_service_id", 0)  # Default to 0 if missing
+        work_type_id = context.user_data.get("selected_service_id")
         work_type_desc = context.user_data.get("selected_service", "")
 
         mikom_desc = context.user_data.get("tire_position", "")
-        mikom_id = 1 if mikom_desc == 'קדמי' else 2
+        mikom_id = 0 if mikom_desc == 'קדמי' else 1
 
         seren_desc = context.user_data.get("axle_position", "")
-        seren_id = 1 if seren_desc == 'פנימי' else 2
+        seren_id = 0 if seren_desc == 'פנימי' else 1
+
+        right_left = 0 if context.user_data.get("left_right_position") == 'שמאל' else 1
+        
 
         # ✅ Fetch missing IDs (SetShipmentID, CustomerID, InternalID)
         customer_id_result = query_database("SELECT [CustomerID], [InternalID] FROM [Ram].[dbo].[Cars] WHERE [CarNum]=?", (car_num,))
@@ -709,12 +721,12 @@ async def save_appointment(update: Update, context: CallbackContext):
 
         # ✅ Construct the EXEC query to match SSMS format
         query = """
-            EXEC [dbo].[InsertBotAppointment] 
+            EXEC [dbo].[InsertBotAppointmentNew] 
                 @BranchID = ?, @Name = ?, @AppointmentDate = ?, @AppointmentTime = ?, 
                 @CarNum = ?, @TypeOfCar = ?, @DriverName = ?, @DriverPhone = ?, 
                 @Unit = ?, @Kil = ?, @WorkTypeID = ?, @WorkTypeDes = ?, 
                 @MikomID = ?, @MikomDes = ?, @SerenID = ?, @SerenDes = ?, 
-                @Pic1 = ?, @Pic2 = ?, @Pic3 = ?, @Pic4 = ?, @Pic5 = ?, @Pic6 = ?
+                @Pic1 = ?, @Pic2 = ?, @Pic3 = ?, @Pic4 = ?, @Pic5 = ?, @Pic6 = ?, @RightLeft = ?
         """
 
         params = (
@@ -722,7 +734,7 @@ async def save_appointment(update: Update, context: CallbackContext):
             driver_name, driver_phone, unit, mileage,
             work_type_id, work_type_desc, mikom_id, mikom_desc, 
             seren_id, seren_desc,
-            image_urls[0], image_urls[1], image_urls[2], image_urls[3], image_urls[4], image_urls[5]
+            image_urls[0], image_urls[1], image_urls[2], image_urls[3], image_urls[4], image_urls[5], right_left
         )
 
         # ✅ Execute SQL query
@@ -730,7 +742,8 @@ async def save_appointment(update: Update, context: CallbackContext):
 
         if result:
             appointment_id = result[0][0]  # Extracting appointment ID
-            await update.message.reply_text(f"✅ הפגישה שלך נשמרה בהצלחה עם מזהה {appointment_id}.")
+            await update.message.reply_text(f"✅ הפגישה שלך נשמרה בהצלחה. מספר הקריאה הינו {appointment_id}.")
+
         else:
             await update.message.reply_text("❌ שגיאה בשמירת הפגישה. נסה שוב.")
 

@@ -16,7 +16,8 @@ STATE_WAITING_FOR_APPOINTMENT = "waiting_for_appointment"
 STATE_WAITING_FOR_AXLE_POSITION = "waiting for axle position"
 STATE_WAITING_FOR_TIRE_POSITION = "waiting for tire position"
 STATE_WAITING_FOR_DATE = "waiting_for_date"
-STATE_WAITING_FOR_TIME = "waiting_for_time",
-STATE_WAITING_FOR_WORK_ORDER = "waiting_for_work_order",
+STATE_WAITING_FOR_TIME = "waiting_for_time"
+STATE_WAITING_FOR_WORK_ORDER = "waiting_for_work_order"
 STATE_WAITING_FOR_TIME_PREFERENCE = "waiting_for_time_preference"
+STATE_WAITING_FOR_LEFT_RIGHT_POSITION = "waiting_for_left_right_position"
 

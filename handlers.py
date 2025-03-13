@@ -14,7 +14,18 @@ import uuid
 from gc_images import upload_image_to_gcs
 
 
+# ✅ Set your Google Cloud Storage bucket name
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/etc/secrets/gcloud_key.json")
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
+BUCKET_NAME = os.environ.get("BUCKET_NAME")
+
+# ✅ Initialize Google Cloud Storage client
+storage_client = storage.Client()
+bucket = storage_client.bucket(BUCKET_NAME)
+
+
+
+
 
 
 def get_best_location(query):

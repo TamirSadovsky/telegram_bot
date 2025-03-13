@@ -10,9 +10,12 @@ import urllib.parse
 import requests
 import logging
 import os
-from config import GOOGLE_MAPS_API_KEY, bucket
 import uuid
 from gc_images import upload_image_to_gcs
+
+
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
+
 
 def get_best_location(query):
     """

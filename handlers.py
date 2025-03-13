@@ -3,7 +3,6 @@ from telegram.ext import CallbackContext
 import logging
 from database import query_database
 from states import *
-import re
 from validators import is_valid_israeli_phone, is_valid_hebrew_name, is_valid_mileage
 import datetime
 from datetime import datetime
@@ -11,40 +10,9 @@ import urllib.parse
 import requests
 import logging
 import os
-from datetime import timedelta
-from google.cloud import storage
-from config import TOKEN
+from config import GOOGLE_MAPS_API_KEY, bucket
 import uuid
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
-
-
-# ✅ Set your Google Cloud Storage bucket name
-BUCKET_NAME = "telegram_bot_images_tamir"
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcloud_key.json"
-
-# ✅ Initialize Google Cloud Storage client
-storage_client = storage.Client()
-bucket = storage_client.bucket(BUCKET_NAME)
-
-GOOGLE_MAPS_API_KEY = "AIzaSyAWODnL_x9dbeoVV5vH0uVY7XIAjpfqZR0"  # 🔹 Replace with your API key
-
-def upload_image_to_gcs(local_file_path: str, destination_blob_name: str) -> str:
-    """
-    Uploads an image to Google Cloud Storage and returns a public URL.
-    """
-    try:
-        blob = bucket.blob(destination_blob_name)
-        blob.upload_from_filename(local_file_path)
-
-        # ✅ Make the file publicly accessible
-        blob.make_public()
-
-        public_url = blob.public_url
-        logging.info(f"✅ Image uploaded successfully: {public_url}")
-        return public_url
-    except Exception as e:
-        logging.error(f"❌ Failed to upload image: {e}")
-        return None
+from gc_images import upload_image_to_gcs
 
 def get_best_location(query):
     """
@@ -304,7 +272,7 @@ async def handle_message(update: Update, context: CallbackContext):
 
         context.user_data["tire_position"] = "קדמי" if user_message == "1" else "אחורי"
         user_states[user_id] = STATE_WAITING_FOR_LEFT_RIGHT_POSITION  # ✅ Move to next step
-        await update.message.reply_text("🔄 איפה נמצא הצמיג? \n1️⃣ - שמאל \n2️⃣ - ימין")
+        await update.message.reply_text("🔄 באיזה צד הצמיג? \n1️⃣ - שמאל \n2️⃣ - ימין")
         logging.info(f"✅ User {user_id} selected left / right position: {context.user_data['tire_position']}, asking for left / right position.")
 
     elif current_state == STATE_WAITING_FOR_LEFT_RIGHT_POSITION:

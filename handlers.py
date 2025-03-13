@@ -12,6 +12,7 @@ import logging
 import os
 import uuid
 from gc_tools import upload_image_to_gcs, generate_navigation_links
+from google.cloud import storage
 
 
 # ✅ Set your Google Cloud Storage bucket name

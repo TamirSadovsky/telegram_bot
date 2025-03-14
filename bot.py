@@ -12,8 +12,8 @@ logging.basicConfig(
 )
 
 def create_app():
-    """Return a WSGI-compatible application."""
-    
+    """Create and return the Telegram bot application."""
+
     logging.info("🚀 Creating Telegram bot application...")  
 
     app = Application.builder().token(TOKEN).build()
@@ -25,16 +25,18 @@ def create_app():
 
     logging.info("✅ Application setup completed.")  
 
-    # ✅ Define a WSGI response function for Gunicorn
-    async def wsgi_app(environ, start_response):
-        """Minimal WSGI app to prevent crashes in Gunicorn."""
-        start_response('200 OK', [('Content-Type', 'text/plain')])
-        return [b"Bot is running!"]
+    return app  # ✅ Return the bot app, NOT a WSGI app!
 
-    return wsgi_app  # ✅ Gunicorn can now call this function
+# ✅ Create the bot application
+application = create_app()
+
+# ✅ Define a separate WSGI application for Gunicorn
+async def wsgi_app(environ, start_response):
+    """Minimal WSGI app for Gunicorn."""
+    start_response('200 OK', [('Content-Type', 'text/plain')])
+    return [b"Bot is running!"]
 
 # ✅ Ensure the bot runs polling when executed directly
 if __name__ == "__main__":
-    application = create_app()
     logging.info("📡 Bot is now running and listening for messages...") 
     application.run_polling()

@@ -1,5 +1,5 @@
 import logging
-import threading
+import asyncio
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from handlers import start, handle_message
 import os
@@ -37,10 +37,12 @@ def wsgi_app(environ, start_response):
     start_response('200 OK', [('Content-Type', 'text/plain')])
     return [b"Bot is running!"]
 
-# ✅ Start polling in a separate thread
-def run_polling():
+# ✅ Ensure bot runs polling with asyncio
+async def run_polling():
     logging.info("📡 Bot is now running and listening for messages...") 
-    application.run_polling()
+    await application.run_polling()
 
-# ✅ Ensure the bot runs when the service starts (on Render)
-threading.Thread(target=run_polling, daemon=True).start()
+# ✅ Start the bot properly
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+loop.create_task(run_polling())

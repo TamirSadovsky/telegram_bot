@@ -2,9 +2,6 @@ import logging
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from handlers import start, handle_message
 from config import TOKEN
-from image_handler import save_image
-from telegram.ext import CallbackQueryHandler
-
 
 # Log declarations
 logging.basicConfig(
@@ -12,23 +9,20 @@ logging.basicConfig(
     level=logging.INFO  
 )
 
-# ✅ Define the app instance globally so Gunicorn can find it
-app = Application.builder().token(TOKEN).build()
+def create_app():  # ✅ Gunicorn can now call this function
+    """Create and return a Telegram bot application instance."""
+    logging.info("🚀 Creating Telegram bot application...")  
 
-# Add handlers
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))  # Handle text messages
-app.add_handler(MessageHandler(filters.PHOTO, handle_message))  # Handle images separately
+    app = Application.builder().token(TOKEN).build()
 
-# ✅ Gunicorn expects an app object, so it needs to be a callable WSGI application
-def run():
-    """Start the bot"""
-    logging.info("🚀 Starting Telegram bot...")
-    logging.info("✅ Application created successfully!")  
-    logging.info("📡 Bot is now running and listening for messages...") 
+    # Add handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))  
+    app.add_handler(MessageHandler(filters.PHOTO, handle_message))  
 
-    app.run_polling()
+    return app  # ✅ Gunicorn now has a callable app function
 
-# ✅ Gunicorn looks for 'app', so we assign 'app' to a function reference
 if __name__ == "__main__":
-    run()
+    app = create_app()
+    logging.info("📡 Bot is now running and listening for messages...") 
+    app.run_polling()

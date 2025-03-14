@@ -1,7 +1,9 @@
 import logging
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from handlers import start, handle_message
-from config import TOKEN
+
+TOKEN = os.environ.get("TOKEN")
+
 
 # Log declarations
 logging.basicConfig(
@@ -9,7 +11,7 @@ logging.basicConfig(
     level=logging.INFO  
 )
 
-def create_app():  # ✅ Gunicorn can now call this function
+def create_app():
     """Create and return a Telegram bot application instance."""
     logging.info("🚀 Creating Telegram bot application...")  
 
@@ -20,7 +22,14 @@ def create_app():  # ✅ Gunicorn can now call this function
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))  
     app.add_handler(MessageHandler(filters.PHOTO, handle_message))  
 
-    return app  # ✅ Gunicorn now has a callable app function
+    logging.info("✅ Application setup completed.")  
+
+    # ✅ Return a simple WSGI response so Gunicorn does not crash
+    def wsgi_app(environ, start_response):
+        start_response('200 OK', [('Content-Type', 'text/plain')])
+        return [b"Bot is running!"]
+
+    return wsgi_app  # ✅ Now Gunicorn gets a valid WSGI app
 
 if __name__ == "__main__":
     app = create_app()

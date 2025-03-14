@@ -1,12 +1,17 @@
-import pyodbc
+import pymssql
 import logging
-from config import DB_CONNECTION_STRING
+import os
+
+DB_HOST = os.getenv("DB_HOST")
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
 
 def query_database(query, params=None):
-    """Execute a query and return results"""
+    """Execute a query using pymssql and return results"""
     try:
         logging.info(f"🔍 Running query: {query} with params: {params}")
-        with pyodbc.connect(DB_CONNECTION_STRING) as conn:
+        with pymssql.connect(DB_HOST, DB_USER, DB_PASSWORD, DB_NAME) as conn:
             cursor = conn.cursor()
             cursor.execute(query, params if params else ())
             results = cursor.fetchall()
@@ -15,10 +20,3 @@ def query_database(query, params=None):
     except Exception as e:
         logging.error(f"❌ Database error: {e}")
         return None
-
-# Checks the connection of the bot to the SQL server
-try:
-    with pyodbc.connect(DB_CONNECTION_STRING) as conn:
-        logging.info("✅ SQL Server is ONLINE and connected successfully!")
-except Exception as e:
-    logging.error(f"❌ Failed to connect to SQL Server: {e}")

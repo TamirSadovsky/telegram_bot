@@ -1,5 +1,4 @@
 import logging
-import threading
 import asyncio
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from handlers import start, handle_message
@@ -38,12 +37,7 @@ def wsgi_app(environ, start_response):
     start_response('200 OK', [('Content-Type', 'text/plain')])
     return [b"Bot is running!"]
 
-# ✅ Start polling in a separate thread with `asyncio` fix
-def start_polling():
+# ✅ Run polling when executed directly
+if __name__ == "__main__":
     logging.info("📡 Bot is now running and listening for messages...") 
-    loop = asyncio.new_event_loop()  # ✅ Create a new event loop
-    asyncio.set_event_loop(loop)  # ✅ Set it as the current event loop
-    loop.run_until_complete(application.run_polling())  # ✅ Start the bot
-
-polling_thread = threading.Thread(target=start_polling, daemon=True)
-polling_thread.start()
+    application.run_polling()  # ✅ Run in the main thread

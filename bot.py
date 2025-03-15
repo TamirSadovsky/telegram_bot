@@ -38,10 +38,12 @@ def wsgi_app(environ, start_response):
     start_response('200 OK', [('Content-Type', 'text/plain')])
     return [b"Bot is running!"]
 
-# ✅ Start polling in a separate thread
+# ✅ Start polling in a separate thread with `asyncio` fix
 def start_polling():
     logging.info("📡 Bot is now running and listening for messages...") 
-    asyncio.run(application.run_polling())
+    loop = asyncio.new_event_loop()  # ✅ Create a new event loop
+    asyncio.set_event_loop(loop)  # ✅ Set it as the current event loop
+    loop.run_until_complete(application.run_polling())  # ✅ Start the bot
 
 polling_thread = threading.Thread(target=start_polling, daemon=True)
 polling_thread.start()

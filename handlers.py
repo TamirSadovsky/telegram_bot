@@ -12,63 +12,7 @@ import logging
 import os
 from config import GOOGLE_MAPS_API_KEY, bucket
 import uuid
-from gc_images import upload_image_to_gcs
-
-def get_best_location(query):
-    """
-    Searches Google Maps API to get the best possible location based on a pancheria name or address.
-    """
-    base_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-    params = {
-        "query": query,
-        "key": GOOGLE_MAPS_API_KEY
-    }
-
-    try:
-        response = requests.get(base_url, params=params)
-        data = response.json()
-
-        if data["status"] == "OK":
-            best_result = data["results"][0]["formatted_address"]
-            return best_result
-        else:
-            logging.warning(f"⚠️ Google Maps API returned no results for query: {query}")
-            return query  # Fallback to original query if no results found
-
-    except Exception as e:
-        logging.error(f"❌ Error fetching location from Google Maps API: {e}")
-        return query  # Fallback in case of API failure
-
-def generate_navigation_links(tire_shop_name):
-    """ Generates Google Maps and Waze navigation links using the best possible query """
-
-    # ✅ Clean and format the name
-    formatted_name = urllib.parse.quote(tire_shop_name)
-
-    # ✅ Try extracting an address from the name
-    if "(" in tire_shop_name and ")" in tire_shop_name:
-        extracted_address = tire_shop_name.split("(")[-1].replace(")", "").strip()
-    elif "-" in tire_shop_name:
-        extracted_address = tire_shop_name.split("-")[-1].strip()
-    else:
-        extracted_address = None
-
-    # ✅ Use the best location available
-    if extracted_address:
-        best_location = get_best_location(extracted_address)  # Get precise location from Google
-    else:
-        best_location = get_best_location(tire_shop_name)  # Try searching the shop name
-
-    # ✅ URL encode for maps & waze
-    query = urllib.parse.quote(best_location)
-
-    # ✅ Generate the links
-    google_maps_link = f"https://www.google.com/maps/search/?api=1&query={query}"
-    waze_link = f"https://waze.com/ul?q={query}"
-
-    return google_maps_link, waze_link
-
-
+from gc_tools import upload_image_to_gcs, generate_navigation_links
 
 
 async def start(update: Update, context: CallbackContext):
@@ -162,36 +106,30 @@ async def handle_message(update: Update, context: CallbackContext):
 
 
     elif current_state == STATE_WAITING_FOR_DRIVER_DETAILS:
-        # ✅ בדיקת שם חוקי בעברית בלבד
         if not await is_valid_hebrew_name(user_message):
             await update.message.reply_text("❌ שם הנהג לא תקין. יש להזין שם בעברית המכיל לפחות שתי אותיות.")
             logging.warning(f"⚠️ Invalid driver name from user {user_id}: {user_message}")
             return
 
-        context.user_data["driver_name"] = user_message  # שמירת השם התקין
+        context.user_data["driver_name"] = user_message  # Store validated name
         user_states[user_id] = STATE_WAITING_FOR_SERVICE_SELECTION
         await update.message.reply_text("📞 הקלד מספר טלפון של הנהג:")
 
-
-
     elif current_state == STATE_WAITING_FOR_SERVICE_SELECTION:
-        # ✅ Validate phone number before proceeding
         if not await is_valid_israeli_phone(user_message):
             await update.message.reply_text("❌ מספר טלפון לא תקין. נא להזין מספר תקין בפורמט ישראלי ללא מקפים (למשל: 0521234567).")
             logging.warning(f"⚠️ Invalid phone number from user {user_id}: {user_message}")
             return
 
-        context.user_data["driver_phone"] = user_message  # Store validated phone number
+        context.user_data["driver_phone"] = user_message
 
-        # ✅ Fetch available services (now includes ItemBox value)
         services = query_database("EXEC FindWorks")
-
         if services:
             valid_service_ids = {}  # Dictionary: {Service ID -> (Service Name, ItemBox)}
             services_text = []
 
             for row in services:
-                service_id, service_name, itembox = row[0], row[1], row[2]  # ✅ Unpacking new ItemBox column
+                service_id, service_name, itembox = row[0], row[1], row[2]
                 if service_id < 11:
                     valid_service_ids[str(service_id)] = (service_name, itembox)
                     services_text.append(f"{service_id} - {service_name}")
@@ -208,25 +146,29 @@ async def handle_message(update: Update, context: CallbackContext):
             await update.message.reply_text("❌ לא נמצאו שירותים זמינים.")
 
     elif current_state == STATE_WAITING_FOR_TIRE_DETAILS:
-        valid_service_ids = context.user_data.get("valid_service_ids", {})  # Retrieve valid services
+        valid_service_ids = context.user_data.get("valid_service_ids", {})
 
         if user_message in valid_service_ids:
-            service_name, itembox = valid_service_ids[user_message]  # ✅ Extract service name and ItemBox
-            context.user_data["selected_service"] = service_name  # Store selected service
-            context.user_data["selected_service_id"] = user_message  # Store selected service ID
-            context.user_data["itembox"] = itembox  # Store ItemBox status
+            service_name, itembox = valid_service_ids[user_message]
+            context.user_data["selected_service"] = service_name
+            context.user_data["selected_service_id"] = user_message
+            context.user_data["itembox"] = itembox
 
-            if itembox == 1:  # ✅ If service requires work order, ask for it first
+            if itembox == 1:
                 user_states[user_id] = STATE_WAITING_FOR_WORK_ORDER
                 await update.message.reply_text("📄 יש להזין מספר פקודת עבודה:")
                 logging.info(f"🔍 User {user_id} selected {service_name} (ItemBox = 1), requesting work order.")
                 return
 
-            # ✅ If ItemBox is 1, ask for tire quantity, otherwise move to tire position
-            user_states[user_id] = STATE_WAITING_FOR_TIRE_QUANTITY if itembox == 1 else STATE_WAITING_FOR_TIRE_POSITION
-            next_message = "🔢 כמה צמיגים תרצה להחליף? (1-20)" if itembox == 1 else "🚗 איפה נמצא הצמיג? \n1️⃣ - קדמי \n2️⃣ - אחורי"
-            await update.message.reply_text(next_message)
-            logging.info(f"🔍 User {user_id} selected service {service_name}, proceeding to {'tire quantity' if itembox == 1 else 'tire position'}.")
+            user_states[user_id] = STATE_WAITING_FOR_TIRE_QUANTITY
+
+            # ✅ Dynamic question based on itembox value
+            if itembox == 1:
+                await update.message.reply_text("🔢 כמה צמיגים תרצה להחליף? (1-20)")
+            else:
+                await update.message.reply_text("🔢 כמה צמיגים תרצה להחליף? (1 או 2 בלבד)")
+            
+            logging.info(f"🔍 User {user_id} selected service {service_name}, proceeding to tire quantity.")
 
         else:
             await update.message.reply_text("❌ הבחירה שלך אינה תקפה. אנא הקלד מספר מתוך הרשימה שהוצגה.")
@@ -238,67 +180,134 @@ async def handle_message(update: Update, context: CallbackContext):
             logging.warning(f"⚠️ Invalid work order number from user {user_id}: {user_message}")
             return
 
-        context.user_data["work_order_number"] = user_message  # ✅ Store work order number
+        context.user_data["work_order_number"] = user_message
+        user_states[user_id] = STATE_WAITING_FOR_TIRE_QUANTITY
 
-        # ✅ If the service requires tire replacement, ask for tire quantity, else ask for tire position
-        user_states[user_id] = STATE_WAITING_FOR_TIRE_QUANTITY if context.user_data["itembox"] == 1 else STATE_WAITING_FOR_TIRE_POSITION
-        next_message = "🔢 כמה צמיגים תרצה להחליף? (1-20)" if context.user_data["itembox"] == 1 else "🚗 איפה נמצא הצמיג? \n1️⃣ - קדמי \n2️⃣ - אחורי"
-        await update.message.reply_text(next_message)
-        logging.info(f"✅ User {user_id} provided work order, proceeding to {'tire quantity' if context.user_data['itembox'] == 1 else 'tire position'}.")
+        # ✅ Dynamic question based on itembox value
+        if context.user_data["itembox"] == 1:
+            await update.message.reply_text("🔢 כמה צמיגים תרצה להחליף? (1-20)")
+        else:
+            await update.message.reply_text("🔢 כמה צמיגים תרצה להחליף? (1 או 2 בלבד)")
+
+        logging.info(f"✅ User {user_id} provided work order, proceeding to tire quantity.")
+
 
     elif current_state == STATE_WAITING_FOR_TIRE_QUANTITY:
         if not user_message.isdigit():
-            await update.message.reply_text("❌ יש להזין מספר תקין בלבד (1-20).")
+            await update.message.reply_text("❌ יש להזין מספר תקין בלבד.")
             logging.warning(f"⚠️ Invalid tire quantity from user {user_id}: {user_message}")
             return
 
         tire_quantity = int(user_message)
+        itembox = context.user_data["itembox"]
 
-        if tire_quantity < 1 or tire_quantity > 20:
-            await update.message.reply_text("❌ כמות אינה מאושרת. ניתן להזין מספר בין 1 ל-20 בלבד.")
-            logging.warning(f"⚠️ User {user_id} entered an invalid tire quantity: {tire_quantity}")
-            return
+        # ✅ Validate tire quantity based on the service type
+        if itembox == 1:
+            if tire_quantity < 1 or tire_quantity > 20:
+                await update.message.reply_text("❌ כמות אינה מאושרת. ניתן להזין מספר בין 1 ל-20 בלבד.")
+                logging.warning(f"⚠️ User {user_id} entered an invalid tire quantity: {tire_quantity}")
+                return
+        else:  # ✅ If itembox == 0, limit to 1 or 2 tires
+            if tire_quantity not in [1, 2]:
+                await update.message.reply_text("❌ ניתן לבחור עד 2 צמיגים בלבד. בחר 1 או 2.")
+                logging.warning(f"⚠️ User {user_id} entered {tire_quantity} when itembox is 0.")
+                return
 
         context.user_data["tire_quantity"] = tire_quantity
-        user_states[user_id] = STATE_WAITING_FOR_TIRE_POSITION  # ✅ Move to next step
-        await update.message.reply_text("🚗 איפה נמצא הצמיג? \n1️⃣ - קדמי \n2️⃣ - אחורי")
-        logging.info(f"✅ User {user_id} entered tire quantity: {tire_quantity}, asking for tire position.")
+        user_states[user_id] = STATE_WAITING_FOR_TIRE_POSITION
+
+        # ✅ Dynamic message based on the number of tires
+        if tire_quantity == 1:
+            await update.message.reply_text("🚗 איפה נמצא הצמיג? \n1️⃣ - קדמי \n2️⃣ - אחורי")
+        else:
+            await update.message.reply_text(
+                f"🚗 הזן את מיקום הצמיגים ({tire_quantity} צמיגים), מופרדים בפסיקים.\n"
+                "1️⃣ - קדמי \n2️⃣ - אחורי\nלדוגמה: 1,2,1,2"
+            )
 
     elif current_state == STATE_WAITING_FOR_TIRE_POSITION:
-        if user_message not in ["1", "2"]:
-            await update.message.reply_text("❌ בחירה לא חוקית. יש לבחור: \n1️⃣ - קדמי \n2️⃣ - אחורי")
-            logging.warning(f"⚠️ Invalid tire position selection from user {user_id}: {user_message}")
-            return
+        tire_quantity = context.user_data["tire_quantity"]
+        positions = user_message.replace(" ", "").split(",")
 
-        context.user_data["tire_position"] = "קדמי" if user_message == "1" else "אחורי"
-        user_states[user_id] = STATE_WAITING_FOR_LEFT_RIGHT_POSITION  # ✅ Move to next step
-        await update.message.reply_text("🔄 באיזה צד הצמיג? \n1️⃣ - שמאל \n2️⃣ - ימין")
-        logging.info(f"✅ User {user_id} selected left / right position: {context.user_data['tire_position']}, asking for left / right position.")
+        # ✅ If the user selected only one tire, expect **a single number** (no commas)
+        if tire_quantity == 1:
+            if user_message not in ["1", "2"]:
+                await update.message.reply_text("❌ יש לבחור מספר תקין בלבד: \n1️⃣ - קדמי \n2️⃣ - אחורי")
+                logging.warning(f"⚠️ Invalid tire position from user {user_id}: {user_message}")
+                return
+            positions = ["קדמי" if user_message == "1" else "אחורי"]
+        else:
+            if len(positions) != tire_quantity or not all(p in ["1", "2"] for p in positions):
+                await update.message.reply_text(f"❌ יש להזין {tire_quantity} מספרים תקינים (1️⃣ - קדמי, 2️⃣ - אחורי), מופרדים בפסיקים.")
+                logging.warning(f"⚠️ Invalid tire positions from user {user_id}: {user_message}")
+                return
+            positions = ["קדמי" if p == "1" else "אחורי" for p in positions]
+
+        context.user_data["tire_positions"] = positions
+        user_states[user_id] = STATE_WAITING_FOR_LEFT_RIGHT_POSITION
+
+        # ✅ Dynamic message for left/right selection
+        if tire_quantity == 1:
+            await update.message.reply_text("🔄 באיזה צד הצמיג? \n1️⃣ - שמאל \n2️⃣ - ימין")
+        else:
+            await update.message.reply_text(
+                f"🔄 הזן את צד הצמיגים ({tire_quantity} צמיגים), מופרדים בפסיקים.\n"
+                "1️⃣ - שמאל \n2️⃣ - ימין\nלדוגמה: 1,2,1,2"
+            )
 
     elif current_state == STATE_WAITING_FOR_LEFT_RIGHT_POSITION:
-        if user_message not in ["1", "2"]:
-            await update.message.reply_text("❌ בחירה לא חוקית. יש לבחור: \n1️⃣ - שמאל \n2️⃣ - ימין")
-            logging.warning(f"⚠️ Invalid left / right position selection from user {user_id}: {user_message}")
-            return
-        context.user_data["left_right_position"] = "ימין" if user_message == "1" else "שמאל"
-        user_states[user_id] = STATE_WAITING_FOR_AXLE_POSITION  # ✅ Move to next step
-        await update.message.reply_text("🔧 איפה הצמיג על הסרן? \n1️⃣ - פנימי \n2️⃣ - חיצוני")
-        logging.info(f"✅ User {user_id} selected tire position: {context.user_data['tire_position']}, asking for axle position.")
+        tire_quantity = context.user_data["tire_quantity"]
+        sides = user_message.replace(" ", "").split(",")
+
+        # ✅ If only one tire was selected, expect a single number
+        if tire_quantity == 1:
+            if user_message not in ["1", "2"]:
+                await update.message.reply_text("❌ יש לבחור מספר תקין בלבד: \n1️⃣ - שמאל \n2️⃣ - ימין")
+                logging.warning(f"⚠️ Invalid side selection from user {user_id}: {user_message}")
+                return
+            sides = ["שמאל" if user_message == "1" else "ימין"]
+        else:
+            if len(sides) != tire_quantity or not all(s in ["1", "2"] for s in sides):
+                await update.message.reply_text(f"❌ יש להזין {tire_quantity} מספרים תקינים (1️⃣ - שמאל, 2️⃣ - ימין), מופרדים בפסיקים.")
+                logging.warning(f"⚠️ Invalid left/right selections from user {user_id}: {user_message}")
+                return
+            sides = ["שמאל" if s == "1" else "ימין" for s in sides]
+
+        context.user_data["left_right_positions"] = sides
+        user_states[user_id] = STATE_WAITING_FOR_AXLE_POSITION
+
+        # ✅ Dynamic message for axle selection
+        if tire_quantity == 1:
+            await update.message.reply_text("🔧 איפה הצמיג על הסרן? \n1️⃣ - פנימי \n2️⃣ - חיצוני")
+        else:
+            await update.message.reply_text(
+                f"🔧 הזן את מיקום הצמיגים על הסרן ({tire_quantity} צמיגים), מופרדים בפסיקים.\n"
+                "1️⃣ - פנימי \n2️⃣ - חיצוני\nלדוגמה: 1,2,1,2"
+            )
 
     elif current_state == STATE_WAITING_FOR_AXLE_POSITION:
-        if user_message not in ["1", "2"]:
-            await update.message.reply_text("❌ בחירה לא חוקית. יש לבחור: \n1️⃣ - פנימי \n2️⃣ - חיצוני")
-            logging.warning(f"⚠️ Invalid axle position selection from user {user_id}: {user_message}")
-            return
+        tire_quantity = context.user_data["tire_quantity"]
+        axles = user_message.replace(" ", "").split(",")
 
-        context.user_data["axle_position"] = "פנימי" if user_message == "1" else "חיצוני"
-        user_states[user_id] = STATE_WAITING_FOR_IMAGES  # ✅ Move to image upload
-        context.user_data["image_urls"] = []  # ✅ Initialize an empty list to store image URLs
+        # ✅ If only one tire was selected, expect a single number
+        if tire_quantity == 1:
+            if user_message not in ["1", "2"]:
+                await update.message.reply_text("❌ יש לבחור מספר תקין בלבד: \n1️⃣ - פנימי \n2️⃣ - חיצוני")
+                logging.warning(f"⚠️ Invalid axle selection from user {user_id}: {user_message}")
+                return
+            axles = ["פנימי" if user_message == "1" else "חיצוני"]
+        else:
+            if len(axles) != tire_quantity or not all(a in ["1", "2"] for a in axles):
+                await update.message.reply_text(f"❌ יש להזין {tire_quantity} מספרים תקינים (1️⃣ - פנימי, 2️⃣ - חיצוני), מופרדים בפסיקים.")
+                logging.warning(f"⚠️ Invalid axle selections from user {user_id}: {user_message}")
+                return
+            axles = ["פנימי" if a == "1" else "חיצוני" for a in axles]
 
-        await update.message.reply_text("📸 שלח תמונה אחת בכל הודעה. יש לשלוח בין 2 ל-6 תמונות של הצמיגים הדורשים תיקון או החלפה.")
+        context.user_data["axle_positions"] = axles
+        user_states[user_id] = STATE_WAITING_FOR_IMAGES
+        await update.message.reply_text("📸 שלח תמונה אחת בכל הודעה. יש לשלוח בין 2 ל-6 תמונות.")
 
-        logging.info(f"✅ User {user_id} selected axle position: {context.user_data['axle_position']}, awaiting images.")
-
+        logging.info(f"✅ User {user_id} selected axle positions: {context.user_data['axle_positions']}, awaiting images.")
 
 
     elif current_state == STATE_WAITING_FOR_IMAGES:
@@ -578,33 +587,33 @@ async def handle_message(update: Update, context: CallbackContext):
 
         if user_message in available_times:
             selected_time = available_times[user_message]
-            context.user_data["selected_time"] = selected_time  # Store selected time
+            context.user_data["selected_time"] = selected_time  # ✅ Store selected time
 
-            # ✅ Get the pancheria name
-            tire_shop_name = context.user_data["selected_tire_shop"]
+            # ✅ Get the tire shop name
+            tire_shop_name = context.user_data.get("selected_tire_shop", "")
+
+            # ✅ Convert the selected date to DD-MM-YYYY format
+            selected_date = context.user_data.get("selected_date")
+            selected_date_str = selected_date.strftime("%d-%m-%Y") if selected_date else "לא ידוע"
 
             # ✅ Generate accurate navigation links
             google_maps_link, waze_link = generate_navigation_links(tire_shop_name)
 
-            # ✅ Convert the selected date back to DD-MM-YYYY format
-            selected_date_str = context.user_data["selected_date"].strftime("%d-%m-%Y")
-
-            # ✅ Now send the navigation links
-            await update.message.reply_text(
-                f"✅ הפגישה נקבעה בהצלחה!\n📅 תאריך: {selected_date_str}\n⏰ שעה: {selected_time}\n🏪 פנצריה: {tire_shop_name}\n\n"
-                f"🔗 [לחץ כאן לניווט עם Google Maps]({google_maps_link})\n"
-                f"🔗 [לחץ כאן לניווט עם Waze]({waze_link})",
-                parse_mode="Markdown"
-            )
+            # ✅ Store all required data in context.user_data for use in save_appointment
+            context.user_data["tire_shop_name"] = tire_shop_name
+            context.user_data["selected_date_str"] = selected_date_str
+            context.user_data["google_maps_link"] = google_maps_link
+            context.user_data["waze_link"] = waze_link
 
             logging.info(f"✅ User {user_id} booked appointment on {selected_date_str} at {selected_time}")
 
-            # ✅ Instead of waiting, call the final appointment scheduling function NOW
+            # ✅ Call save_appointment function now to finalize the booking
             await save_appointment(update, context)
 
         else:
             await update.message.reply_text("❌ המספר שנבחר אינו תקף. אנא בחר מספר מהרשימה.")
             logging.warning(f"⚠️ Invalid time selection from user {user_id}: {user_message}")
+
 
 
 
@@ -624,18 +633,28 @@ async def save_appointment(update: Update, context: CallbackContext):
         driver_phone = context.user_data.get("driver_phone", "")
         unit = context.user_data.get("unit", "")
         mileage = str(context.user_data.get("mileage", "0.0"))  # Ensure it's a string
-
         work_type_id = context.user_data.get("selected_service_id")
         work_type_desc = context.user_data.get("selected_service", "")
 
-        mikom_desc = context.user_data.get("tire_position", "")
-        mikom_id = 0 if mikom_desc == 'קדמי' else 1
+        # ✅ Convert Tire Positions (Front/Rear) to Single String Format
+        tire_positions = context.user_data.get("tire_positions", [])
+        mikom_id = "".join(["1" if pos == "קדמי" else "2" for pos in tire_positions])
+        mikom_des = ",".join(tire_positions)[:30]  # Limit to 30 characters
 
-        seren_desc = context.user_data.get("axle_position", "")
-        seren_id = 0 if seren_desc == 'פנימי' else 1
+        # ✅ Convert Axle Positions (Inner/Outer) to Single String Format
+        axle_positions = context.user_data.get("axle_positions", [])
+        seren_id = "".join(["1" if pos == "פנימי" else "2" for pos in axle_positions])
+        seren_des = ",".join(axle_positions)[:30]  # Limit to 30 characters
 
-        right_left = 0 if context.user_data.get("left_right_position") == 'שמאל' else 1
-        
+        # ✅ Convert Left/Right Positions to Single String Format
+        left_right_positions = context.user_data.get("left_right_positions", [])
+        right_left = "".join(["1" if pos == "שמאל" else "2" for pos in left_right_positions])
+
+        # ✅ Get stored navigation details
+        tire_shop_name = context.user_data.get("tire_shop_name", "לא ידוע")
+        selected_date_str = context.user_data.get("selected_date_str", "לא ידוע")
+        google_maps_link = context.user_data.get("google_maps_link", "#")
+        waze_link = context.user_data.get("waze_link", "#")
 
         # ✅ Fetch missing IDs (SetShipmentID, CustomerID, InternalID)
         customer_id_result = query_database("SELECT [CustomerID], [InternalID] FROM [Ram].[dbo].[Cars] WHERE [CarNum]=?", (car_num,))
@@ -700,8 +719,7 @@ async def save_appointment(update: Update, context: CallbackContext):
         params = (
             branch_id, name, appointment_date, appointment_time, car_num, type_of_car,
             driver_name, driver_phone, unit, mileage,
-            work_type_id, work_type_desc, mikom_id, mikom_desc, 
-            seren_id, seren_desc,
+            work_type_id, work_type_desc, mikom_id, mikom_des, seren_id, seren_des,
             image_urls[0], image_urls[1], image_urls[2], image_urls[3], image_urls[4], image_urls[5], right_left
         )
 
@@ -709,8 +727,26 @@ async def save_appointment(update: Update, context: CallbackContext):
         result = query_database(query, params)
 
         if result:
-            appointment_id = result[0][0]  # Extracting appointment ID
-            await update.message.reply_text(f"✅ הפגישה שלך נשמרה בהצלחה. מספר הקריאה הינו {appointment_id}.")
+            appointment_id = result[0][0]  # מספר מזהה לקריאה
+
+            # ✅ הודעה ראשונה - אישור הפגישה עם כל הפרטים
+            await update.message.reply_text(
+                f"✅ הפגישה נקבעה בהצלחה!\n\n"
+                f"📅 תאריך: {selected_date_str}\n"
+                f"⏰ שעה: {appointment_time}\n"
+                f"🏪 פנצריה: {tire_shop_name}\n"
+                f"📌 מספר קריאה: {appointment_id}"
+            )
+
+            # ✅ הודעה שנייה - קישורי ניווט
+            await update.message.reply_text(
+                f"🔗 לנוחיותך, ניתן לנווט אל המקום באמצעות:\n"
+                f"📍 [Google Maps]({google_maps_link})\n"
+                f"📍 [Waze]({waze_link})",
+                parse_mode="Markdown"
+            )
+
+            logging.info(f"✅ הפגישה {appointment_id} נשמרה בהצלחה עבור המשתמש {user_id}.")
 
         else:
             await update.message.reply_text("❌ שגיאה בשמירת הפגישה. נסה שוב.")
@@ -722,14 +758,6 @@ async def save_appointment(update: Update, context: CallbackContext):
     except Exception as e:
         logging.error(f"❌ ERROR during appointment booking: {e}")
         await update.message.reply_text("❌ שגיאה כללית. נסה שוב מאוחר יותר.")
-
-
-
-
-
-
-
-
 
 
 

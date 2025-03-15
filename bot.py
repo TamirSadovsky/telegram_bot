@@ -3,6 +3,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from handlers import start, handle_message
 from config import TOKEN
 from image_handler import save_image
+from telegram.ext import CallbackQueryHandler
 
 
 # Log declarations
@@ -27,7 +28,6 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))  # Handle text messages
     app.add_handler(MessageHandler(filters.PHOTO, handle_message))  # Handle images separately
-
 
 
     app.run_polling()

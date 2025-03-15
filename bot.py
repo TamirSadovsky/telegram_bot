@@ -1,4 +1,5 @@
 import logging
+import threading
 import asyncio
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from handlers import start, handle_message
@@ -31,18 +32,16 @@ def create_app():
 # ✅ Create the bot application
 application = create_app()
 
-# ✅ Define a synchronous WSGI function for Gunicorn
+# ✅ Define a WSGI function for Gunicorn
 def wsgi_app(environ, start_response):
-    """Minimal synchronous WSGI app for Gunicorn."""
+    """Minimal WSGI app for Gunicorn."""
     start_response('200 OK', [('Content-Type', 'text/plain')])
     return [b"Bot is running!"]
 
-# ✅ Ensure bot runs polling with asyncio
-async def run_polling():
+# ✅ Start polling in a separate thread
+def start_polling():
     logging.info("📡 Bot is now running and listening for messages...") 
-    await application.run_polling()
+    asyncio.run(application.run_polling())
 
-# ✅ Start the bot properly
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-loop.create_task(run_polling())
+polling_thread = threading.Thread(target=start_polling, daemon=True)
+polling_thread.start()

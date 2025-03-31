@@ -13,7 +13,26 @@ import os
 from config import GOOGLE_MAPS_API_KEY, bucket
 import uuid
 from gc_tools import upload_image_to_gcs, generate_navigation_links
+import random
 
+# Define the allowed numbers for each image type
+IMAGE_TYPES = {
+    "type1.jpg": list(range(1, 6)),   # 1 to 5
+    "type2.jpg": list(range(1, 8)),   # 1 to 7
+    "type3.jpg": list(range(1, 12)),  # 1 to 11
+    "type4.jpg": list(range(1, 8)),   # 1 to 7
+    "type5.jpg": list(range(1, 15)),  # 1 to 14
+    "type6.jpg": list(range(1, 19)),  # 1 to 18
+}
+
+RESERVED_WHEELS = {
+    "type1.jpg": 1,
+    "type2.jpg": 1,
+    "type3.jpg": 1,
+    "type4.jpg": 1,
+    "type5.jpg": 2,
+    "type6.jpg": 2,
+}
 
 async def start(update: Update, context: CallbackContext):
     logging.getLogger().setLevel(logging.INFO)
@@ -148,7 +167,7 @@ async def handle_message(update: Update, context: CallbackContext):
     elif current_state == STATE_WAITING_FOR_TIRE_DETAILS:
         valid_service_ids = context.user_data.get("valid_service_ids", {})
 
-        if user_message in valid_service_ids:
+        if user_message in valid_service_ids:  # ✅ FIXED CHECK!
             service_name, itembox = valid_service_ids[user_message]
             context.user_data["selected_service"] = service_name
             context.user_data["selected_service_id"] = user_message
@@ -160,19 +179,45 @@ async def handle_message(update: Update, context: CallbackContext):
                 logging.info(f"🔍 User {user_id} selected {service_name} (ItemBox = 1), requesting work order.")
                 return
 
-            user_states[user_id] = STATE_WAITING_FOR_TIRE_QUANTITY
+            user_states[user_id] = STATE_WAITING_FOR_TIRE_SELECTION
 
-            # ✅ Dynamic question based on itembox value
-            if itembox == 1:
-                await update.message.reply_text("🔢 כמה צמיגים תרצה להחליף? (1-20)")
+            # 🎲 Randomly select an image type
+            selected_image = random.choice(list(IMAGE_TYPES.keys()))
+            context.user_data["selected_image"] = selected_image
+            valid_wheel_numbers = IMAGE_TYPES[selected_image]
+
+            # ✅ Determine reserved wheels dynamically
+            if selected_image in ["type1.jpg", "type2.jpg", "type3.jpg", "type4.jpg"]:
+                reserved_wheels = [valid_wheel_numbers[-1]]  # Last 1 is reserved
             else:
-                await update.message.reply_text("🔢 כמה צמיגים תרצה להחליף? (1 או 2 בלבד)")
-            
-            logging.info(f"🔍 User {user_id} selected service {service_name}, proceeding to tire quantity.")
+                reserved_wheels = valid_wheel_numbers[-2:]  # Last 2 are reserved
 
+            # ✅ Choose correct message for repair vs. replacement
+            action_message = "נא לבחור את הצמיגים להחלפה" if itembox == 1 else "נא לבחור את הצמיגים לתיקון"
+
+            # ✅ Format reserved wheel message correctly
+            if len(reserved_wheels) == 1:
+                reserved_wheel_msg = f"⚠️ צמיג מספר {reserved_wheels[0]} הוא רזרבי, לתשומת ליבך."
+            else:
+                reserved_wheel_msg = f"⚠️ צמיגים מספר {', '.join(map(str, reserved_wheels))} הם רזרביים, לתשומת ליבך."
+
+            # ✅ Send the image to the user with updated caption
+            with open(selected_image, "rb") as img:
+                await update.message.reply_photo(
+                    img,
+                    caption=(
+                        f"📸 {action_message}.\n"
+                        f"🔹 ניתן לבחור מספרים בין {valid_wheel_numbers[0]} ל-{valid_wheel_numbers[-1]}.\n"
+                        f"🔹 מספרים מופרדים בפסיקים (למשל: 1,3,5,7).\n\n"
+                        f"{reserved_wheel_msg}"
+                    )
+                )
+
+            logging.info(f"✅ User {user_id} selected service {service_name}, proceeding to tire selection with {selected_image}.")
         else:
             await update.message.reply_text("❌ הבחירה שלך אינה תקפה. אנא הקלד מספר מתוך הרשימה שהוצגה.")
             logging.warning(f"⚠️ Invalid service selection from user {user_id}: {user_message}")
+
 
     elif current_state == STATE_WAITING_FOR_WORK_ORDER:
         if not user_message.isdigit():
@@ -181,133 +226,77 @@ async def handle_message(update: Update, context: CallbackContext):
             return
 
         context.user_data["work_order_number"] = user_message
-        user_states[user_id] = STATE_WAITING_FOR_TIRE_QUANTITY
+        user_states[user_id] = STATE_WAITING_FOR_TIRE_SELECTION
 
-        # ✅ Dynamic question based on itembox value
-        if context.user_data["itembox"] == 1:
-            await update.message.reply_text("🔢 כמה צמיגים תרצה להחליף? (1-20)")
+        # 🎲 Randomly select an image type
+        selected_image = random.choice(list(IMAGE_TYPES.keys()))
+        context.user_data["selected_image"] = selected_image
+        valid_wheel_numbers = IMAGE_TYPES[selected_image]
+
+        # ✅ Determine reserved wheels dynamically
+        if selected_image in ["type1.jpg", "type2.jpg", "type3.jpg", "type4.jpg"]:
+            reserved_wheels = [valid_wheel_numbers[-1]]  # Last 1 is reserved
         else:
-            await update.message.reply_text("🔢 כמה צמיגים תרצה להחליף? (1 או 2 בלבד)")
+            reserved_wheels = valid_wheel_numbers[-2:]  # Last 2 are reserved
 
-        logging.info(f"✅ User {user_id} provided work order, proceeding to tire quantity.")
+        # ✅ Choose correct message for repair vs. replacement
+        action_message = "נא לבחור את הצמיגים להחלפה" if context.user_data["itembox"] == 1 else "נא לבחור את הצמיגים לתיקון"
 
+        # ✅ Format reserved wheel message correctly
+        if len(reserved_wheels) == 1:
+            reserved_wheel_msg = f"⚠️ צמיג מספר {reserved_wheels[0]} הוא רזרבי, לתשומת ליבך."
+        else:
+            reserved_wheel_msg = f"⚠️ צמיגים מספר {', '.join(map(str, reserved_wheels))} הם רזרביים, לתשומת ליבך."
 
-    elif current_state == STATE_WAITING_FOR_TIRE_QUANTITY:
-        if not user_message.isdigit():
-            await update.message.reply_text("❌ יש להזין מספר תקין בלבד.")
-            logging.warning(f"⚠️ Invalid tire quantity from user {user_id}: {user_message}")
+        # ✅ Send the image to the user with updated caption
+        with open(selected_image, "rb") as img:
+            await update.message.reply_photo(
+                img,
+                caption=(
+                    f"📸 {action_message}.\n"
+                    f"🔹 ניתן לבחור מספרים בין {valid_wheel_numbers[0]} ל-{valid_wheel_numbers[-1]}.\n"
+                    f"🔹 מספרים מופרדים בפסיקים (למשל: 1,3,5,7).\n\n"
+                    f"{reserved_wheel_msg}"
+                )
+            )
+
+        logging.info(f"✅ User {user_id} provided work order, proceeding to tire selection with {selected_image}.")
+
+    elif current_state == STATE_WAITING_FOR_TIRE_SELECTION:
+        selected_wheels = user_message.replace(" ", "").split(",")
+
+        selected_image = context.user_data.get("selected_image")
+        valid_wheel_numbers = IMAGE_TYPES.get(selected_image, [])
+
+        # ✅ Validate user input
+        if not all(wheel.isdigit() and int(wheel) in valid_wheel_numbers for wheel in selected_wheels):
+            await update.message.reply_text(
+                f"❌ בחירה לא חוקית. יש להזין מספרים תקינים בלבד בין {valid_wheel_numbers[0]} ל-{valid_wheel_numbers[-1]}, "
+                f"מופרדים בפסיקים.\n🔹 נסה שוב (למשל: 1,3,5,7)."
+            )
+            logging.warning(f"⚠️ Invalid wheel selection from user {user_id}: {user_message}")
             return
 
-        tire_quantity = int(user_message)
-        itembox = context.user_data["itembox"]
+        # ✅ Prevent duplicate selections
+        if len(selected_wheels) != len(set(selected_wheels)):
+            await update.message.reply_text("❌ לא ניתן לבחור את אותו הצמיג פעמיים. נסה שוב.")
+            logging.warning(f"⚠️ User {user_id} tried to select duplicate wheels: {selected_wheels}")
+            return
 
-        # ✅ Validate tire quantity based on the service type
-        if itembox == 1:
-            if tire_quantity < 1 or tire_quantity > 20:
-                await update.message.reply_text("❌ כמות אינה מאושרת. ניתן להזין מספר בין 1 ל-20 בלבד.")
-                logging.warning(f"⚠️ User {user_id} entered an invalid tire quantity: {tire_quantity}")
-                return
-        else:  # ✅ If itembox == 0, limit to 1 or 2 tires
-            if tire_quantity not in [1, 2]:
-                await update.message.reply_text("❌ ניתן לבחור עד 2 צמיגים בלבד. בחר 1 או 2.")
-                logging.warning(f"⚠️ User {user_id} entered {tire_quantity} when itembox is 0.")
-                return
-
-        context.user_data["tire_quantity"] = tire_quantity
-        user_states[user_id] = STATE_WAITING_FOR_TIRE_POSITION
-
-        # ✅ Dynamic message based on the number of tires
-        if tire_quantity == 1:
-            await update.message.reply_text("🚗 איפה נמצא הצמיג? \n1️⃣ - קדמי \n2️⃣ - אחורי")
-        else:
-            await update.message.reply_text(
-                f"🚗 הזן את מיקום הצמיגים ({tire_quantity} צמיגים), מופרדים בפסיקים.\n"
-                "1️⃣ - קדמי \n2️⃣ - אחורי\nלדוגמה: 1,2,1,2"
-            )
-
-    elif current_state == STATE_WAITING_FOR_TIRE_POSITION:
-        tire_quantity = context.user_data["tire_quantity"]
-        positions = user_message.replace(" ", "").split(",")
-
-        # ✅ If the user selected only one tire, expect **a single number** (no commas)
-        if tire_quantity == 1:
-            if user_message not in ["1", "2"]:
-                await update.message.reply_text("❌ יש לבחור מספר תקין בלבד: \n1️⃣ - קדמי \n2️⃣ - אחורי")
-                logging.warning(f"⚠️ Invalid tire position from user {user_id}: {user_message}")
-                return
-            positions = ["קדמי" if user_message == "1" else "אחורי"]
-        else:
-            if len(positions) != tire_quantity or not all(p in ["1", "2"] for p in positions):
-                await update.message.reply_text(f"❌ יש להזין {tire_quantity} מספרים תקינים (1️⃣ - קדמי, 2️⃣ - אחורי), מופרדים בפסיקים.")
-                logging.warning(f"⚠️ Invalid tire positions from user {user_id}: {user_message}")
-                return
-            positions = ["קדמי" if p == "1" else "אחורי" for p in positions]
-
-        context.user_data["tire_positions"] = positions
-        user_states[user_id] = STATE_WAITING_FOR_LEFT_RIGHT_POSITION
-
-        # ✅ Dynamic message for left/right selection
-        if tire_quantity == 1:
-            await update.message.reply_text("🔄 באיזה צד הצמיג? \n1️⃣ - שמאל \n2️⃣ - ימין")
-        else:
-            await update.message.reply_text(
-                f"🔄 הזן את צד הצמיגים ({tire_quantity} צמיגים), מופרדים בפסיקים.\n"
-                "1️⃣ - שמאל \n2️⃣ - ימין\nלדוגמה: 1,2,1,2"
-            )
-
-    elif current_state == STATE_WAITING_FOR_LEFT_RIGHT_POSITION:
-        tire_quantity = context.user_data["tire_quantity"]
-        sides = user_message.replace(" ", "").split(",")
-
-        # ✅ If only one tire was selected, expect a single number
-        if tire_quantity == 1:
-            if user_message not in ["1", "2"]:
-                await update.message.reply_text("❌ יש לבחור מספר תקין בלבד: \n1️⃣ - שמאל \n2️⃣ - ימין")
-                logging.warning(f"⚠️ Invalid side selection from user {user_id}: {user_message}")
-                return
-            sides = ["שמאל" if user_message == "1" else "ימין"]
-        else:
-            if len(sides) != tire_quantity or not all(s in ["1", "2"] for s in sides):
-                await update.message.reply_text(f"❌ יש להזין {tire_quantity} מספרים תקינים (1️⃣ - שמאל, 2️⃣ - ימין), מופרדים בפסיקים.")
-                logging.warning(f"⚠️ Invalid left/right selections from user {user_id}: {user_message}")
-                return
-            sides = ["שמאל" if s == "1" else "ימין" for s in sides]
-
-        context.user_data["left_right_positions"] = sides
-        user_states[user_id] = STATE_WAITING_FOR_AXLE_POSITION
-
-        # ✅ Dynamic message for axle selection
-        if tire_quantity == 1:
-            await update.message.reply_text("🔧 איפה הצמיג על הסרן? \n1️⃣ - פנימי \n2️⃣ - חיצוני")
-        else:
-            await update.message.reply_text(
-                f"🔧 הזן את מיקום הצמיגים על הסרן ({tire_quantity} צמיגים), מופרדים בפסיקים.\n"
-                "1️⃣ - פנימי \n2️⃣ - חיצוני\nלדוגמה: 1,2,1,2"
-            )
-
-    elif current_state == STATE_WAITING_FOR_AXLE_POSITION:
-        tire_quantity = context.user_data["tire_quantity"]
-        axles = user_message.replace(" ", "").split(",")
-
-        # ✅ If only one tire was selected, expect a single number
-        if tire_quantity == 1:
-            if user_message not in ["1", "2"]:
-                await update.message.reply_text("❌ יש לבחור מספר תקין בלבד: \n1️⃣ - פנימי \n2️⃣ - חיצוני")
-                logging.warning(f"⚠️ Invalid axle selection from user {user_id}: {user_message}")
-                return
-            axles = ["פנימי" if user_message == "1" else "חיצוני"]
-        else:
-            if len(axles) != tire_quantity or not all(a in ["1", "2"] for a in axles):
-                await update.message.reply_text(f"❌ יש להזין {tire_quantity} מספרים תקינים (1️⃣ - פנימי, 2️⃣ - חיצוני), מופרדים בפסיקים.")
-                logging.warning(f"⚠️ Invalid axle selections from user {user_id}: {user_message}")
-                return
-            axles = ["פנימי" if a == "1" else "חיצוני" for a in axles]
-
-        context.user_data["axle_positions"] = axles
+        # ✅ Store the selected wheels
+        context.user_data["selected_wheels"] = selected_wheels
         user_states[user_id] = STATE_WAITING_FOR_IMAGES
-        await update.message.reply_text("📸 שלח תמונה אחת בכל הודעה. יש לשלוח בין 2 ל-6 תמונות.")
 
-        logging.info(f"✅ User {user_id} selected axle positions: {context.user_data['axle_positions']}, awaiting images.")
+        await update.message.reply_text(
+            "📸 אנא שלח תמונות של הצמיגים שבחרת להחליף או לתקן.\n"
+            "🔹 שלח תמונה אחת בכל הודעה.\n"
+            "🔹 יש לשלוח בין 2 ל-6 תמונות."
+        )
+
+
+        logging.info(f"✅ User {user_id} selected wheels: {selected_wheels}, moving to image upload.")
+
+
 
 
     elif current_state == STATE_WAITING_FOR_IMAGES:
